@@ -1,0 +1,25 @@
+[project]
+name = "frame-intelligence-api"
+version = "0.1.0"
+description = "Backend API for the Frame Intelligence Platform"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi[standard]",
+    "pydantic-settings>=2.0",
+]
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
