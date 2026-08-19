@@ -8,7 +8,11 @@ import numpy as np
 
 from frame_worker.deduplication.ssim import is_near_duplicate
 from frame_worker.enhancement.classical import enhance_frame
-from frame_worker.extraction.ffmpeg import ExtractedFrame, FFmpegExtractor
+from frame_worker.extraction.ffmpeg import (
+    ExtractedFrame,
+    FFmpegExtractor,
+    StreamingFFmpegExtractor,
+)
 from frame_worker.processing.selector import FrameCandidate, ShortlistCandidateSelector
 from frame_worker.quality.scorer import calculate_fast_quality, calculate_quality
 
@@ -81,7 +85,7 @@ class VideoProcessor:
             raise FileNotFoundError(f"Video not found: {video_path}")
 
         output_directory.mkdir(parents=True, exist_ok=True)
-        extractor = self._extractor or FFmpegExtractor(
+        extractor = self._extractor or StreamingFFmpegExtractor(
             ffmpeg_binary=self.config.ffmpeg_binary,
             ffprobe_binary=self.config.ffprobe_binary,
         )
