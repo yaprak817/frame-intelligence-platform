@@ -2,11 +2,13 @@ import numpy as np
 import pytest
 
 import frame_worker.processing.pipeline as pipeline_module
+import frame_worker.quality.motion as motion_module
 from frame_worker.extraction.ffmpeg import ExtractedFrame, VideoMetadata
 from frame_worker.processing.pipeline import (
     ProcessingConfig,
     VideoProcessor,
 )
+from frame_worker.quality.scorer import QualityResult
 
 
 class FakeExtraction:
@@ -174,3 +176,76 @@ def test_optical_flow_quality_runs_only_for_shortlisted_frames(
     assert summary.candidate_frames == 10
     assert summary.shortlisted_frames == 4
     assert len(calls) == 4
+
+
+def run_adaptive_motion_count(
+    tmp_path,
+    monkeypatch,
+    scores: list[float],
+) -> tuple[int, int]:
+    frames = [
+        np.full((120, 160, 3), index, dtype=np.uint8)
+        for index in range(len(scores))
+    ]
+    extraction = FakeExtraction(frames=frames, fps=5.0)
+    processor = VideoProcessor(
+        ProcessingConfig(
+            candidate_fps=5.0,
+            shortlist_size=3,
+            adaptive_shortlist_enabled=True,
+            adaptive_shortlist_threshold=0.04,
+            min_size=64,
+        ),
+        extractor=FakeExtractor(extraction),
+    )
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"fake-video")
+
+    def fake_fast_quality(frame):
+        score = scores[int(frame[0, 0, 0])]
+        return QualityResult(score, score, 128.0, 1.0, 0.0)
+
+    original_farneback = motion_module.cv2.calcOpticalFlowFarneback
+    farneback_calls = 0
+
+    def tracked_farneback(*args, **kwargs):
+        nonlocal farneback_calls
+        farneback_calls += 1
+        return original_farneback(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "calculate_fast_quality", fake_fast_quality)
+    monkeypatch.setattr(
+        motion_module.cv2,
+        "calcOpticalFlowFarneback",
+        tracked_farneback,
+    )
+    summary = processor.process(video_path, tmp_path / "output")
+    return summary.shortlisted_frames, farneback_calls
+
+
+def test_adaptive_top_two_window_runs_farneback_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    shortlist, farneback_calls = run_adaptive_motion_count(
+        tmp_path,
+        monkeypatch,
+        [100.0, 90.0, 10.0],
+    )
+
+    assert shortlist == 2
+    assert farneback_calls == 1
+
+
+def test_adaptive_top_three_window_preserves_motion_reranking(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    shortlist, farneback_calls = run_adaptive_motion_count(
+        tmp_path,
+        monkeypatch,
+        [100.0, 90.0, 88.0],
+    )
+
+    assert shortlist == 3
+    assert farneback_calls == 2
