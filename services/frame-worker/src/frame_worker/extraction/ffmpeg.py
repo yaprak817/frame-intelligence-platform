@@ -26,6 +26,8 @@ class VideoMetadata:
     source_fps: float
     total_frames: int
     duration_seconds: float
+    width: int = 0
+    height: int = 0
 
 
 @dataclass(frozen=True)
@@ -136,7 +138,7 @@ class FFmpegExtractor:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=avg_frame_rate,nb_frames,duration:format=duration",
+            "stream=avg_frame_rate,nb_frames,duration,width,height:format=duration",
             "-of",
             "json",
             str(video_path),
@@ -174,7 +176,13 @@ class FFmpegExtractor:
         if duration_seconds <= 0 and total_frames > 0:
             duration_seconds = total_frames / source_fps
 
-        return VideoMetadata(source_fps, total_frames, duration_seconds)
+        return VideoMetadata(
+            source_fps=source_fps,
+            total_frames=total_frames,
+            duration_seconds=duration_seconds,
+            width=int(stream.get("width", 0)),
+            height=int(stream.get("height", 0)),
+        )
 
     def extract(self, video_path: Path, candidate_fps: float) -> ExtractionResult:
         if candidate_fps <= 0:
@@ -209,3 +217,130 @@ class FFmpegExtractor:
             temporary_directory=temporary_directory,
             candidate_fps=candidate_fps,
         )
+
+
+class StreamingExtractionResult(AbstractContextManager["StreamingExtractionResult"]):
+    """Iterate over fixed-size BGR frames from an FFmpeg stdout pipe."""
+
+    def __init__(
+        self,
+        metadata: VideoMetadata,
+        process: subprocess.Popen[bytes],
+        candidate_fps: float,
+    ) -> None:
+        self.metadata = metadata
+        self._process = process
+        self._candidate_fps = candidate_fps
+        self._finished = False
+
+    def __iter__(self) -> Iterator[ExtractedFrame]:
+        stdout = self._process.stdout
+        if stdout is None:
+            raise FFmpegExtractionError("FFmpeg stdout pipe is unavailable")
+
+        frame_size = self.metadata.width * self.metadata.height * 3
+        index = 0
+        while True:
+            frame_bytes = self._read_frame(stdout, frame_size)
+            if not frame_bytes:
+                self._finish()
+                return
+            if len(frame_bytes) != frame_size:
+                stderr = self._finish(allow_failure=True)
+                detail = stderr.strip() or "No stderr output was produced."
+                raise FFmpegExtractionError(
+                    "FFmpeg returned an incomplete raw frame: "
+                    f"expected {frame_size} bytes, received {len(frame_bytes)}. "
+                    f"stderr: {detail}"
+                )
+
+            index += 1
+            frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
+                self.metadata.height,
+                self.metadata.width,
+                3,
+            )
+            yield ExtractedFrame(
+                frame=frame,
+                frame_number=index,
+                timestamp=(index - 1) / self._candidate_fps,
+            )
+
+    @staticmethod
+    def _read_frame(stdout, frame_size: int) -> bytes:
+        chunks: list[bytes] = []
+        remaining = frame_size
+        while remaining:
+            chunk = stdout.read(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _finish(self, allow_failure: bool = False) -> str:
+        if self._finished:
+            return ""
+        self._finished = True
+        stderr = self._process.stderr.read() if self._process.stderr else b""
+        return_code = self._process.wait()
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        if return_code and not allow_failure:
+            raise FFmpegExtractionError(
+                f"FFmpeg failed with exit code {return_code}: "
+                f"{stderr_text.strip() or 'No stderr output was produced.'}"
+            )
+        return stderr_text
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if self._finished:
+            return
+        if self._process.stdout:
+            self._process.stdout.close()
+        if self._process.poll() is None:
+            self._process.terminate()
+        self._finish(allow_failure=True)
+
+
+class StreamingFFmpegExtractor(FFmpegExtractor):
+    """Stream candidate frames as raw BGR bytes without temporary images."""
+
+    def extract(
+        self,
+        video_path: Path,
+        candidate_fps: float,
+    ) -> StreamingExtractionResult:
+        if candidate_fps <= 0:
+            raise ValueError("candidate_fps must be greater than zero")
+
+        metadata = self.probe(video_path)
+        if metadata.width <= 0 or metadata.height <= 0:
+            raise FFmpegExtractionError(
+                "ffprobe did not return a valid video width and height"
+            )
+
+        command = [
+            self.ffmpeg_binary,
+            "-v",
+            "error",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"fps={candidate_fps}",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "pipe:1",
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return StreamingExtractionResult(metadata, process, candidate_fps)

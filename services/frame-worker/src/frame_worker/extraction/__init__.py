@@ -6,6 +6,8 @@ from frame_worker.extraction.ffmpeg import (
     FFmpegConfigurationError,
     FFmpegExtractionError,
     FFmpegExtractor,
+    StreamingExtractionResult,
+    StreamingFFmpegExtractor,
     VideoMetadata,
 )
 
@@ -15,5 +17,7 @@ __all__ = [
     "FFmpegConfigurationError",
     "FFmpegExtractionError",
     "FFmpegExtractor",
+    "StreamingExtractionResult",
+    "StreamingFFmpegExtractor",
     "VideoMetadata",
 ]
