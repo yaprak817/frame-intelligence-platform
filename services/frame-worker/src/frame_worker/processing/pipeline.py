@@ -18,6 +18,7 @@ from frame_worker.quality.scorer import calculate_fast_quality, calculate_qualit
 
 DEFAULT_JPEG_QUALITY = 98
 DEFAULT_SHORTLIST_SIZE = 3
+DEFAULT_ADAPTIVE_SHORTLIST_THRESHOLD = 0.04
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class ProcessingConfig:
     candidate_fps: float = 5.0
     selection_window_seconds: float = 1.0
     shortlist_size: int = DEFAULT_SHORTLIST_SIZE
+    adaptive_shortlist_enabled: bool = False
+    adaptive_shortlist_threshold: float = DEFAULT_ADAPTIVE_SHORTLIST_THRESHOLD
     min_size: int = 640
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     ffmpeg_binary: str | Path | None = None
@@ -37,6 +40,10 @@ class ProcessingConfig:
             raise ValueError("selection_window_seconds must be greater than zero")
         if self.shortlist_size <= 0:
             raise ValueError("shortlist_size must be greater than zero")
+        if self.adaptive_shortlist_enabled and self.shortlist_size < 3:
+            raise ValueError("adaptive shortlist requires shortlist_size of at least 3")
+        if self.adaptive_shortlist_threshold < 0:
+            raise ValueError("adaptive_shortlist_threshold cannot be negative")
 
 
 @dataclass(frozen=True)
@@ -115,6 +122,8 @@ class VideoProcessor:
         selector = ShortlistCandidateSelector(
             window_seconds=self.config.selection_window_seconds,
             shortlist_size=self.config.shortlist_size,
+            adaptive_enabled=self.config.adaptive_shortlist_enabled,
+            adaptive_threshold=self.config.adaptive_shortlist_threshold,
         )
         counts = _ProcessingCounts()
         last_saved_frame: np.ndarray | None = None

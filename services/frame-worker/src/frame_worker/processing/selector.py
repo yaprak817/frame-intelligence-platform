@@ -81,14 +81,26 @@ class BestCandidateSelector:
 class ShortlistCandidateSelector:
     """Keep the top-K fast-quality candidates from each time window."""
 
-    def __init__(self, window_seconds: float = 1.0, shortlist_size: int = 3) -> None:
+    def __init__(
+        self,
+        window_seconds: float = 1.0,
+        shortlist_size: int = 3,
+        adaptive_enabled: bool = False,
+        adaptive_threshold: float = 0.04,
+    ) -> None:
         if window_seconds <= 0:
             raise ValueError("window_seconds must be greater than zero")
         if shortlist_size <= 0:
             raise ValueError("shortlist_size must be greater than zero")
+        if adaptive_enabled and shortlist_size < 3:
+            raise ValueError("adaptive shortlist requires shortlist_size of at least 3")
+        if adaptive_threshold < 0:
+            raise ValueError("adaptive_threshold cannot be negative")
 
         self.window_seconds = window_seconds
         self.shortlist_size = shortlist_size
+        self.adaptive_enabled = adaptive_enabled
+        self.adaptive_threshold = adaptive_threshold
         self._current_window: int | None = None
         self._candidates: list[FrameCandidate] = []
         self._last_timestamp: float | None = None
@@ -121,8 +133,22 @@ class ShortlistCandidateSelector:
         return candidates
 
     def _ranked_candidates(self) -> list[FrameCandidate]:
-        return sorted(
+        ranked = sorted(
             self._candidates,
             key=lambda candidate: candidate.quality.quality,
             reverse=True,
         )[: self.shortlist_size]
+
+        if not self.adaptive_enabled or len(ranked) < 3:
+            return ranked
+
+        score2 = ranked[1].quality.quality
+        score3 = ranked[2].quality.quality
+        relative_gap = max(score2 - score3, 0.0) / max(
+            abs(score2),
+            abs(score3),
+            1e-12,
+        )
+        if relative_gap > self.adaptive_threshold:
+            return ranked[:2]
+        return ranked[:3]

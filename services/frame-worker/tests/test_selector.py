@@ -97,3 +97,55 @@ def test_shortlist_keeps_top_k_candidates_per_window() -> None:
     assert completed is not None
     assert [item.quality.quality for item in completed] == [50.0, 30.0]
     assert [item.quality.quality for item in selector.flush()] == [20.0]
+
+
+def adaptive_scores(scores: list[float]) -> list[float]:
+    selector = ShortlistCandidateSelector(
+        shortlist_size=3,
+        adaptive_enabled=True,
+        adaptive_threshold=0.04,
+    )
+    for index, score in enumerate(scores):
+        selector.add(make_candidate(index / 10, score, index + 1))
+    return [candidate.quality.quality for candidate in selector.flush()]
+
+
+def test_adaptive_gap_above_threshold_uses_top_two() -> None:
+    assert adaptive_scores([200.0, 100.0, 95.0]) == [200.0, 100.0]
+
+
+def test_adaptive_gap_equal_to_threshold_keeps_top_three() -> None:
+    assert adaptive_scores([200.0, 100.0, 96.0]) == [200.0, 100.0, 96.0]
+
+
+def test_adaptive_gap_below_threshold_keeps_top_three() -> None:
+    assert adaptive_scores([200.0, 100.0, 98.0]) == [200.0, 100.0, 98.0]
+
+
+def test_adaptive_equal_second_and_third_scores_keep_top_three() -> None:
+    assert adaptive_scores([200.0, 100.0, 100.0]) == [200.0, 100.0, 100.0]
+
+
+def test_adaptive_zero_scores_are_safe() -> None:
+    assert adaptive_scores([1.0, 0.0, 0.0]) == [1.0, 0.0, 0.0]
+
+
+def test_adaptive_negative_scores_are_safe() -> None:
+    assert adaptive_scores([1.0, -1.0, -2.0]) == [1.0, -1.0]
+
+
+def test_adaptive_window_with_two_candidates_is_safe() -> None:
+    assert adaptive_scores([20.0, 10.0]) == [20.0, 10.0]
+
+
+def test_disabled_adaptive_shortlist_keeps_configured_size() -> None:
+    selector = ShortlistCandidateSelector(
+        shortlist_size=3,
+        adaptive_enabled=False,
+        adaptive_threshold=0.04,
+    )
+    selector.add(make_candidate(0.1, 200.0))
+    selector.add(make_candidate(0.2, 100.0))
+    selector.add(make_candidate(0.3, 1.0))
+
+    assert len(selector.flush()) == 3
