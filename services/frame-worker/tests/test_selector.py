@@ -4,6 +4,7 @@ import pytest
 from frame_worker.processing.selector import (
     BestCandidateSelector,
     FrameCandidate,
+    ShortlistCandidateSelector,
 )
 from frame_worker.quality.scorer import QualityResult
 
@@ -83,3 +84,16 @@ def test_out_of_order_timestamp_raises_error() -> None:
 
     with pytest.raises(ValueError):
         selector.add(make_candidate(1.0, 30.0))
+
+
+def test_shortlist_keeps_top_k_candidates_per_window() -> None:
+    selector = ShortlistCandidateSelector(window_seconds=1.0, shortlist_size=2)
+
+    selector.add(make_candidate(0.1, 10.0))
+    selector.add(make_candidate(0.2, 50.0))
+    selector.add(make_candidate(0.3, 30.0))
+    completed = selector.add(make_candidate(1.1, 20.0))
+
+    assert completed is not None
+    assert [item.quality.quality for item in completed] == [50.0, 30.0]
+    assert [item.quality.quality for item in selector.flush()] == [20.0]

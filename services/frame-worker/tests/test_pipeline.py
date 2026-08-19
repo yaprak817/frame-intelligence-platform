@@ -1,48 +1,46 @@
-import cv2
 import numpy as np
 import pytest
 
 import frame_worker.processing.pipeline as pipeline_module
+from frame_worker.extraction.ffmpeg import ExtractedFrame, VideoMetadata
 from frame_worker.processing.pipeline import (
     ProcessingConfig,
     VideoProcessor,
 )
 
 
-class FakeCapture:
+class FakeExtraction:
     def __init__(
         self,
         frames: list[np.ndarray],
         fps: float,
+        total_frames: int | None = None,
     ) -> None:
         self.frames = frames
-        self.fps = fps
-        self.index = 0
-        self.released = False
+        source_frame_count = total_frames or len(frames)
+        duration = source_frame_count / fps if fps > 0 else 0.0
+        self.metadata = VideoMetadata(fps, source_frame_count, duration)
+        self.closed = False
 
-    def isOpened(self) -> bool:
-        return True
+    def __iter__(self):
+        for index, frame in enumerate(self.frames):
+            yield ExtractedFrame(frame, index + 1, index / 5.0)
 
-    def get(self, property_id: int) -> float:
-        if property_id == cv2.CAP_PROP_FPS:
-            return self.fps
+    def __enter__(self):
+        return self
 
-        if property_id == cv2.CAP_PROP_FRAME_COUNT:
-            return float(len(self.frames))
+    def __exit__(self, *args) -> None:
+        self.closed = True
 
-        return 0.0
 
-    def read(self) -> tuple[bool, np.ndarray | None]:
-        if self.index >= len(self.frames):
-            return False, None
+class FakeExtractor:
+    def __init__(self, extraction: FakeExtraction) -> None:
+        self.extraction = extraction
+        self.calls = []
 
-        frame = self.frames[self.index]
-        self.index += 1
-
-        return True, frame.copy()
-
-    def release(self) -> None:
-        self.released = True
+    def extract(self, video_path, candidate_fps):
+        self.calls.append((video_path, candidate_fps))
+        return self.extraction
 
 
 def make_test_frames(
@@ -67,20 +65,15 @@ def make_test_frames(
 
 def test_processor_samples_and_saves_frames(
     tmp_path,
-    monkeypatch,
 ) -> None:
-    frames = make_test_frames(50)
+    frames = make_test_frames(10)
 
-    fake_capture = FakeCapture(
+    extraction = FakeExtraction(
         frames=frames,
         fps=25.0,
+        total_frames=50,
     )
-
-    monkeypatch.setattr(
-        pipeline_module.cv2,
-        "VideoCapture",
-        lambda _: fake_capture,
-    )
+    extractor = FakeExtractor(extraction)
 
     video_path = tmp_path / "video.mp4"
     video_path.write_bytes(b"fake-video")
@@ -92,7 +85,8 @@ def test_processor_samples_and_saves_frames(
             candidate_fps=5.0,
             selection_window_seconds=1.0,
             min_size=64,
-        )
+        ),
+        extractor=extractor,
     )
 
     summary = processor.process(
@@ -107,11 +101,14 @@ def test_processor_samples_and_saves_frames(
     assert summary.duration_seconds == 2.0
 
     assert summary.candidate_frames == 10
-    assert summary.selected_frames == 3
+    assert summary.shortlisted_frames == 6
+    assert summary.selected_frames == 2
     assert summary.duplicate_frames == 0
 
-    assert len(saved_files) == 3
-    assert fake_capture.released is True
+    assert summary.processing_seconds >= 0
+    assert summary.speed_x is not None
+    assert len(saved_files) == 2
+    assert extraction.closed is True
 
 
 def test_missing_video_raises_error(
@@ -131,31 +128,49 @@ def test_missing_video_raises_error(
 
 def test_invalid_video_fps_raises_error(
     tmp_path,
-    monkeypatch,
 ) -> None:
-    fake_capture = FakeCapture(
+    extraction = FakeExtraction(
         frames=make_test_frames(10),
         fps=0.0,
-    )
-
-    monkeypatch.setattr(
-        pipeline_module.cv2,
-        "VideoCapture",
-        lambda _: fake_capture,
     )
 
     video_path = tmp_path / "video.mp4"
     video_path.write_bytes(b"fake-video")
 
-    processor = VideoProcessor()
+    processor = VideoProcessor(extractor=FakeExtractor(extraction))
 
-    with pytest.raises(
-        ValueError,
-        match="Video FPS must be greater than zero",
-    ):
+    with pytest.raises(ValueError, match="Video FPS must be greater than zero"):
         processor.process(
             video_path=video_path,
             output_directory=tmp_path / "output",
         )
 
-    assert fake_capture.released is True
+    assert extraction.closed is True
+
+
+def test_optical_flow_quality_runs_only_for_shortlisted_frames(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    frames = make_test_frames(10)
+    extraction = FakeExtraction(frames=frames, fps=5.0)
+    processor = VideoProcessor(
+        ProcessingConfig(candidate_fps=5.0, shortlist_size=2, min_size=64),
+        extractor=FakeExtractor(extraction),
+    )
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"fake-video")
+    original = pipeline_module.calculate_quality
+    calls = []
+
+    def tracked_quality(frame, previous_frame=None):
+        calls.append(frame)
+        return original(frame, previous_frame)
+
+    monkeypatch.setattr(pipeline_module, "calculate_quality", tracked_quality)
+
+    summary = processor.process(video_path, tmp_path / "output")
+
+    assert summary.candidate_frames == 10
+    assert summary.shortlisted_frames == 4
+    assert len(calls) == 4

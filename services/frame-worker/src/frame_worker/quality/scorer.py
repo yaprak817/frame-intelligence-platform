@@ -46,3 +46,23 @@ def calculate_quality(
         exposure=float(exposure),
         motion=float(motion),
     )
+
+
+def calculate_fast_quality(frame: np.ndarray) -> QualityResult:
+    """Calculate inexpensive metrics without optical flow."""
+
+    sharpness = calculate_sharpness(frame)
+    brightness = calculate_brightness(frame)
+    exposure = calculate_exposure_score(brightness)
+    quality = sharpness * exposure
+
+    if brightness < MIN_BRIGHTNESS or brightness > MAX_BRIGHTNESS:
+        quality *= 0.25
+
+    return QualityResult(
+        quality=float(quality),
+        sharpness=float(sharpness),
+        brightness=float(brightness),
+        exposure=float(exposure),
+        motion=0.0,
+    )
