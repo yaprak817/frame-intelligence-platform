@@ -158,3 +158,41 @@ def test_redirect_to_private_ip_is_blocked(tmp_path) -> None:
             tmp_path,
             IngestionConfig(),
         )
+
+
+def test_direct_media_suffix_is_a_definite_match() -> None:
+    adapter = DirectHTTPVideoAdapter()
+
+    assert adapter.match(URLSourceRequest("https://cdn.example/video.mp4")).name == (
+        "DEFINITE"
+    )
+
+
+def test_platform_page_is_only_a_possible_direct_match() -> None:
+    adapter = DirectHTTPVideoAdapter()
+
+    assert adapter.match(URLSourceRequest("https://platform.example/watch/1")).name == (
+        "POSSIBLE"
+    )
+
+
+def test_ambiguous_403_allows_platform_fallback(tmp_path) -> None:
+    adapter = safe_adapter([FakeResponse(status_code=403)])
+
+    with pytest.raises(UnsupportedVideoSourceError, match="not confirmed"):
+        adapter.acquire(
+            URLSourceRequest("https://platform.example/watch/1"),
+            tmp_path,
+            IngestionConfig(),
+        )
+
+
+def test_definite_direct_403_remains_download_error(tmp_path) -> None:
+    adapter = safe_adapter([FakeResponse(status_code=403)])
+
+    with pytest.raises(VideoDownloadError, match="HTTP status 403"):
+        adapter.acquire(
+            URLSourceRequest("https://cdn.example/video.mp4"),
+            tmp_path,
+            IngestionConfig(),
+        )
