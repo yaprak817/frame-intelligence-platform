@@ -18,6 +18,26 @@ jobs:
     name: Backend Quality Checks
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: frame_intelligence_test
+          POSTGRES_USER: frame_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U frame_user -d frame_intelligence_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://frame_user:test_password@localhost:5432/frame_intelligence_test
+      TEST_DATABASE_URL: postgresql+psycopg://frame_user:test_password@localhost:5432/frame_intelligence_test
+      JOB_SOURCE_ENCRYPTION_KEY: VFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQ=
+
     defaults:
       run:
         working-directory: apps/backend
@@ -37,6 +57,9 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked --dev
+
+      - name: Apply database migrations
+        run: uv run alembic upgrade head
 
       - name: Run Ruff lint
         run: uv run ruff check src tests
