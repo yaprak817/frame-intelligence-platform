@@ -1,7 +1,10 @@
 from pathlib import Path
 
+import httpx
 import pytest
 
+from frame_worker.ingestion.adapters.base import AdapterMatch
+from frame_worker.ingestion.adapters.direct_http import DirectHTTPVideoAdapter
 from frame_worker.ingestion.config import IngestionConfig
 from frame_worker.ingestion.errors import (
     InvalidVideoSourceError,
@@ -115,3 +118,89 @@ def test_processor_error_still_cleans_remote_temp(tmp_path) -> None:
 
     assert adapter.acquired_path is not None
     assert not adapter.acquired_path.exists()
+
+
+class MatchingAdapter(FakeAdapter):
+    def __init__(self, match: AdapterMatch, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.match_value = match
+
+    def match(self, _request: URLSourceRequest) -> AdapterMatch:
+        return self.match_value
+
+
+def test_resolver_prefers_definite_match_over_registration_order(tmp_path) -> None:
+    possible = MatchingAdapter(AdapterMatch.POSSIBLE)
+    definite = MatchingAdapter(AdapterMatch.DEFINITE)
+    resolver = SourceResolver([possible, definite])
+
+    resolver.resolve(
+        URLSourceRequest("https://cdn.example/video.mp4"),
+        tmp_path,
+        IngestionConfig(),
+    )
+
+    assert definite.acquired_path is not None
+    assert possible.acquired_path is None
+
+
+class ProbeResponse:
+    def __init__(self, status_code=200, content_type="text/html") -> None:
+        self.status_code = status_code
+        self.headers = {"content-type": content_type}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def iter_bytes(self, _chunk_size):
+        yield b"<html>platform page</html>"
+
+
+class ProbeClient:
+    def __init__(self, response=None, error=None) -> None:
+        self.response = response
+        self.error = error
+
+    def stream(self, *_args, **_kwargs):
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+@pytest.mark.parametrize("status_code", [200, 401, 403])
+def test_platform_page_falls_back_to_generic_adapter(tmp_path, status_code) -> None:
+    direct = DirectHTTPVideoAdapter(
+        client=ProbeClient(ProbeResponse(status_code)),
+        url_validator=lambda _url: None,
+    )
+    platform = MatchingAdapter(AdapterMatch.POSSIBLE)
+    resolver = SourceResolver([direct, platform])
+
+    resolver.resolve(
+        URLSourceRequest("https://platform.example/watch/1"),
+        tmp_path,
+        IngestionConfig(),
+    )
+
+    assert platform.acquired_path is not None
+
+
+def test_direct_network_timeout_is_not_masked_by_fallback(tmp_path) -> None:
+    direct = DirectHTTPVideoAdapter(
+        client=ProbeClient(error=httpx.ReadTimeout("timed out")),
+        url_validator=lambda _url: None,
+    )
+    platform = MatchingAdapter(AdapterMatch.POSSIBLE)
+    resolver = SourceResolver([direct, platform])
+
+    with pytest.raises(Exception, match="timed out"):
+        resolver.resolve(
+            URLSourceRequest("https://platform.example/watch/1"),
+            tmp_path,
+            IngestionConfig(),
+        )
+
+    assert platform.acquired_path is None

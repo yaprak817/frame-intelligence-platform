@@ -9,6 +9,8 @@ class IngestionConfig:
     total_timeout_seconds: float = 15 * 60.0
     max_redirects: int = 3
     chunk_size_bytes: int = 1024 * 1024
+    yt_dlp_socket_timeout_seconds: float = 30.0
+    subprocess_terminate_grace_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         if self.max_download_bytes <= 0:
@@ -23,3 +25,7 @@ class IngestionConfig:
             raise ValueError("max_redirects cannot be negative")
         if self.chunk_size_bytes <= 0:
             raise ValueError("chunk_size_bytes must be greater than zero")
+        if self.yt_dlp_socket_timeout_seconds <= 0:
+            raise ValueError("yt_dlp_socket_timeout_seconds must be greater than zero")
+        if self.subprocess_terminate_grace_seconds < 0:
+            raise ValueError("subprocess_terminate_grace_seconds cannot be negative")

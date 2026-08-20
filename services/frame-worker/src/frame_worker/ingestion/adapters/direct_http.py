@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import httpx
 
+from frame_worker.ingestion.adapters.base import AdapterMatch
 from frame_worker.ingestion.config import IngestionConfig
 from frame_worker.ingestion.errors import (
     UnsupportedVideoSourceError,
@@ -39,8 +40,17 @@ class DirectHTTPVideoAdapter:
         self._url_validator = url_validator
         self._clock = clock
 
+    def match(self, request: URLSourceRequest) -> AdapterMatch:
+        parsed = urlsplit(request.url)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return AdapterMatch.NO_MATCH
+        suffix = Path(unquote(parsed.path)).suffix.lower()
+        if suffix in ALLOWED_VIDEO_SUFFIXES:
+            return AdapterMatch.DEFINITE
+        return AdapterMatch.POSSIBLE
+
     def supports(self, request: URLSourceRequest) -> bool:
-        return urlsplit(request.url).scheme.lower() in {"http", "https"}
+        return self.match(request) is not AdapterMatch.NO_MATCH
 
     def acquire(
         self,
@@ -91,6 +101,12 @@ class DirectHTTPVideoAdapter:
                         self._url_validator(current_url)
                         continue
 
+                    if response.status_code in {401, 403} and self.match(
+                        URLSourceRequest(current_url)
+                    ) is AdapterMatch.POSSIBLE:
+                        raise UnsupportedVideoSourceError(
+                            "Ambiguous URL was not confirmed as direct video media"
+                        )
                     if response.status_code < 200 or response.status_code >= 300:
                         raise VideoDownloadError(
                             "Video download failed for "

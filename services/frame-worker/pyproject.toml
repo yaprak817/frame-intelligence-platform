@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=2.2.6",
     "opencv-python-headless>=5.0.0.93",
     "scikit-image>=0.25.2",
+    "yt-dlp[curl-cffi]>=2025.1.15",
 ]
 
 [build-system]
