@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -10,7 +10,15 @@ from app.db.base import Base
 
 class JobOutbox(Base):
     __tablename__ = "job_outbox"
-    __table_args__ = (Index("ix_job_outbox_unpublished", "published_at", "created_at"),)
+    __table_args__ = (
+        Index("ix_job_outbox_unpublished", "published_at", "created_at"),
+        Index(
+            "ix_job_outbox_ready",
+            "next_attempt_at",
+            "created_at",
+            postgresql_where=text("published_at IS NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     aggregate_id: Mapped[UUID] = mapped_column(
@@ -25,3 +33,6 @@ class JobOutbox(Base):
         DateTime(timezone=True), nullable=True
     )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )

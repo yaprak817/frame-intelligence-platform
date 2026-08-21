@@ -5,10 +5,14 @@ description = "Frame processing worker for the Frame Intelligence Platform"
 requires-python = ">=3.10"
 dependencies = [
     "boto3>=1.35",
+    "celery[redis]>=5.4",
+    "cryptography>=45",
     "httpx>=0.27.0",
     "numpy>=2.2.6",
     "opencv-python-headless>=5.0.0.93",
     "scikit-image>=0.25.2",
+    "psycopg[binary]>=3.2",
+    "sqlalchemy>=2.0",
     "yt-dlp[curl-cffi]>=2025.1.15",
 ]
 

@@ -65,3 +65,17 @@ infrastructure/
 tests/
 
 docs/
+```
+
+## Asynchronous Processing
+
+Video submissions are persisted with a transactional outbox. A dedicated
+publisher sends minimal `job_id` messages to Redis, and the frame-worker claims
+jobs from PostgreSQL before materializing URL or object-storage sources. Job
+state, retries, execution leases, and result summaries remain authoritative in
+PostgreSQL; Celery has no result backend.
+
+This orchestration stage records processing summaries but intentionally does
+not provide durable frame artifacts. Extracted frames are produced in a
+job-scoped temporary workspace and cleaned after processing. A follow-up change
+will persist frame manifests and artifacts to S3-compatible object storage.

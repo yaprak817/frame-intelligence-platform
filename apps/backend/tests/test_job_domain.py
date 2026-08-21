@@ -10,6 +10,7 @@ from app.domain.jobs import JobStatus
         (JobStatus.QUEUED, JobStatus.RUNNING),
         (JobStatus.RUNNING, JobStatus.SUCCEEDED),
         (JobStatus.RUNNING, JobStatus.FAILED),
+        (JobStatus.RUNNING, JobStatus.QUEUED),
     ],
 )
 def test_allowed_job_transitions(source: JobStatus, target: JobStatus) -> None:

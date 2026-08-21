@@ -88,6 +88,9 @@ class JobService:
             idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
             result_reference=None,
+            result_summary=None,
+            run_token=None,
+            lease_expires_at=None,
             version=1,
         )
         event = JobOutbox(
@@ -98,6 +101,7 @@ class JobService:
             created_at=now,
             published_at=None,
             attempt_count=0,
+            next_attempt_at=now,
         )
         try:
             await self._repository.create_with_outbox(job, event)
@@ -160,6 +164,9 @@ class JobService:
             idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
             result_reference=None,
+            result_summary=None,
+            run_token=None,
+            lease_expires_at=None,
             version=1,
         )
         event = JobOutbox(
@@ -170,6 +177,7 @@ class JobService:
             created_at=now,
             published_at=None,
             attempt_count=0,
+            next_attempt_at=now,
         )
         try:
             await self._repository.create_with_outbox(job, event)

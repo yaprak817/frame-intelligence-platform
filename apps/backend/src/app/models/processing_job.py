@@ -2,7 +2,16 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -50,4 +59,11 @@ class ProcessingJob(Base):
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     result_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_summary: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    run_token: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

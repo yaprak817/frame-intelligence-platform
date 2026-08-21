@@ -1,4 +1,82 @@
 services:
+  backend:
+    build:
+      context: ./apps/backend
+    container_name: frame-intelligence-backend
+    command:
+      - /bin/sh
+      - -c
+      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment: &backend-environment
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-frame_user}:${POSTGRES_PASSWORD:-change_me}@postgres:5432/${POSTGRES_DB:-frame_intelligence}
+      JOB_SOURCE_ENCRYPTION_KEY: ${JOB_SOURCE_ENCRYPTION_KEY}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:-http://minio:9000}
+      OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-frame_admin}
+      OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-change_me}
+      OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-frame-intelligence}
+      OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+      OBJECT_STORAGE_ADDRESSING_STYLE: ${OBJECT_STORAGE_ADDRESSING_STYLE:-path}
+      OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS:-1}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-10}
+      OUTBOX_BACKOFF_BASE_SECONDS: ${OUTBOX_BACKOFF_BASE_SECONDS:-1}
+      OUTBOX_BACKOFF_MAX_SECONDS: ${OUTBOX_BACKOFF_MAX_SECONDS:-60}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  outbox-publisher:
+    build:
+      context: ./apps/backend
+    container_name: frame-intelligence-outbox-publisher
+    command: ["python", "-m", "app.outbox.publisher"]
+    environment: *backend-environment
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frame-worker:
+    build:
+      context: ./services/frame-worker
+    container_name: frame-intelligence-frame-worker
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-frame_user}:${POSTGRES_PASSWORD:-change_me}@postgres:5432/${POSTGRES_DB:-frame_intelligence}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      JOB_SOURCE_ENCRYPTION_KEY: ${JOB_SOURCE_ENCRYPTION_KEY}
+      OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:-http://minio:9000}
+      OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-frame_admin}
+      OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-change_me}
+      OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+      OBJECT_STORAGE_ADDRESSING_STYLE: ${OBJECT_STORAGE_ADDRESSING_STYLE:-path}
+      MAX_DOWNLOAD_BYTES: ${MAX_DOWNLOAD_BYTES:-2147483648}
+      JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-900}
+      JOB_HEARTBEAT_INTERVAL_SECONDS: ${JOB_HEARTBEAT_INTERVAL_SECONDS:-60}
+      CELERY_VISIBILITY_TIMEOUT_SECONDS: ${CELERY_VISIBILITY_TIMEOUT_SECONDS:-7200}
+      CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    tmpfs:
+      - /tmp/frame-intelligence:mode=1777
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     container_name: frame-intelligence-postgres
@@ -26,6 +104,11 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   minio:
