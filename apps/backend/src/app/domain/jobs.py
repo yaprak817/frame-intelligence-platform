@@ -15,7 +15,9 @@ class JobStatus(StrEnum):
 _ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.PENDING_DISPATCH: frozenset({JobStatus.QUEUED}),
     JobStatus.QUEUED: frozenset({JobStatus.RUNNING}),
-    JobStatus.RUNNING: frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED}),
+    JobStatus.RUNNING: frozenset(
+        {JobStatus.QUEUED, JobStatus.SUCCEEDED, JobStatus.FAILED}
+    ),
     JobStatus.SUCCEEDED: frozenset(),
     JobStatus.FAILED: frozenset(),
 }
@@ -34,6 +36,7 @@ class FailureCode(StrEnum):
     DOWNLOAD_TIMEOUT = "DOWNLOAD_TIMEOUT"
     DOWNLOAD_FAILED = "DOWNLOAD_FAILED"
     PROCESSING_FAILED = "PROCESSING_FAILED"
+    STORAGE_UNAVAILABLE = "STORAGE_UNAVAILABLE"
 
 
 class OutboxEventType(StrEnum):

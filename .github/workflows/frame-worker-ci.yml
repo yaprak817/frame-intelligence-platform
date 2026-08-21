@@ -4,22 +4,53 @@ on:
   pull_request:
     paths:
       - "services/frame-worker/**"
+      - "compose.yaml"
+      - ".env.example"
       - ".github/workflows/frame-worker-ci.yml"
   push:
     branches: [main]
     paths:
       - "services/frame-worker/**"
+      - "compose.yaml"
+      - ".env.example"
       - ".github/workflows/frame-worker-ci.yml"
 
 jobs:
   worker-quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: frame_intelligence_test
+          POSTGRES_USER: frame_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U frame_user -d frame_intelligence_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       OBJECT_STORAGE_INTEGRATION: "1"
       OBJECT_STORAGE_ENDPOINT: http://localhost:9000
       OBJECT_STORAGE_ACCESS_KEY: frame_admin
       OBJECT_STORAGE_SECRET_KEY: test_password
       OBJECT_STORAGE_BUCKET: frame-intelligence-test
+      DATABASE_URL: postgresql+psycopg://frame_user:test_password@localhost:5432/frame_intelligence_test
+      TEST_DATABASE_URL: postgresql+psycopg://frame_user:test_password@localhost:5432/frame_intelligence_test
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      JOB_SOURCE_ENCRYPTION_KEY: VFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQ=
     defaults:
       run:
         working-directory: services/frame-worker
@@ -31,6 +62,11 @@ jobs:
           enable-cache: true
       - run: uv python install 3.13
       - run: uv sync --locked --dev
+      - name: Apply database migrations
+        working-directory: apps/backend
+        run: |
+          uv sync --locked --dev
+          uv run alembic upgrade head
       - name: Start MinIO
         run: >-
           docker run -d --name frame-intelligence-ci-minio

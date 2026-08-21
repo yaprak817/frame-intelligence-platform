@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "apps/backend/**"
+      - "compose.yaml"
+      - ".env.example"
       - ".github/workflows/backend-ci.yml"
 
   push:
@@ -11,6 +13,8 @@ on:
       - main
     paths:
       - "apps/backend/**"
+      - "compose.yaml"
+      - ".env.example"
       - ".github/workflows/backend-ci.yml"
 
 jobs:
@@ -32,6 +36,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     env:
       DATABASE_URL: postgresql+psycopg://frame_user:test_password@localhost:5432/frame_intelligence_test
@@ -42,6 +55,8 @@ jobs:
       OBJECT_STORAGE_ACCESS_KEY: frame_admin
       OBJECT_STORAGE_SECRET_KEY: test_password
       OBJECT_STORAGE_BUCKET: frame-intelligence-test
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      BROKER_INTEGRATION: "1"
 
     defaults:
       run:

@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     object_storage_addressing_style: str = "path"
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024
     object_storage_multipart_chunk_bytes: int = 8 * 1024 * 1024
+    celery_broker_url: str = "redis://localhost:6379/0"
+    outbox_poll_interval_seconds: float = 1.0
+    outbox_batch_size: int = 10
+    outbox_backoff_base_seconds: float = 1.0
+    outbox_backoff_max_seconds: float = 60.0
 
     @field_validator("job_source_encryption_key")
     @classmethod
@@ -60,6 +65,16 @@ class Settings(BaseSettings):
         if self.object_storage_multipart_chunk_bytes < 5 * 1024 * 1024:
             raise ValueError(
                 "OBJECT_STORAGE_MULTIPART_CHUNK_BYTES must be at least 5 MiB"
+            )
+        if self.outbox_poll_interval_seconds <= 0:
+            raise ValueError("OUTBOX_POLL_INTERVAL_SECONDS must be greater than zero")
+        if not 1 <= self.outbox_batch_size <= 100:
+            raise ValueError("OUTBOX_BATCH_SIZE must be between 1 and 100")
+        if self.outbox_backoff_base_seconds <= 0:
+            raise ValueError("OUTBOX_BACKOFF_BASE_SECONDS must be greater than zero")
+        if self.outbox_backoff_max_seconds < self.outbox_backoff_base_seconds:
+            raise ValueError(
+                "OUTBOX_BACKOFF_MAX_SECONDS must be at least the base backoff"
             )
         return self
 

@@ -44,6 +44,9 @@ def _job_and_event() -> tuple[ProcessingJob, JobOutbox]:
         idempotency_key=f"repository-{uuid4()}",
         request_fingerprint="f" * 64,
         result_reference=None,
+        result_summary=None,
+        run_token=None,
+        lease_expires_at=None,
         version=1,
     )
     event = JobOutbox(
@@ -54,6 +57,7 @@ def _job_and_event() -> tuple[ProcessingJob, JobOutbox]:
         created_at=now,
         published_at=None,
         attempt_count=0,
+        next_attempt_at=now,
     )
     return job, event
 
