@@ -29,7 +29,10 @@ class ProcessingJob(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     source_type: Mapped[str] = mapped_column(String(16), nullable=False)
     source_display: Mapped[str] = mapped_column(String(2048), nullable=False)
-    source_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    source_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_reference: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     processing_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False

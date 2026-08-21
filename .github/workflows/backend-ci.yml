@@ -37,6 +37,11 @@ jobs:
       DATABASE_URL: postgresql+psycopg://frame_user:test_password@localhost:5432/frame_intelligence_test
       TEST_DATABASE_URL: postgresql+psycopg://frame_user:test_password@localhost:5432/frame_intelligence_test
       JOB_SOURCE_ENCRYPTION_KEY: VFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQ=
+      OBJECT_STORAGE_INTEGRATION: "1"
+      OBJECT_STORAGE_ENDPOINT: http://localhost:9000
+      OBJECT_STORAGE_ACCESS_KEY: frame_admin
+      OBJECT_STORAGE_SECRET_KEY: test_password
+      OBJECT_STORAGE_BUCKET: frame-intelligence-test
 
     defaults:
       run:
@@ -57,6 +62,22 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked --dev
+
+      - name: Start MinIO
+        run: >-
+          docker run -d --name frame-intelligence-ci-minio
+          -p 9000:9000
+          -e MINIO_ROOT_USER=frame_admin
+          -e MINIO_ROOT_PASSWORD=test_password
+          minio/minio:latest server /data
+
+      - name: Wait for MinIO
+        run: |
+          for attempt in {1..30}; do
+            curl --fail http://localhost:9000/minio/health/live && exit 0
+            sleep 2
+          done
+          exit 1
 
       - name: Apply database migrations
         run: uv run alembic upgrade head

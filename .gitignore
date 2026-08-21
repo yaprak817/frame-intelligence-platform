@@ -256,6 +256,8 @@ uploads/
 outputs/
 artifacts/
 storage/
+!apps/backend/src/app/storage/
+!apps/backend/src/app/storage/*.py
 
 # ML model weights
 *.pt

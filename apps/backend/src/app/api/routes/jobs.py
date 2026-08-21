@@ -1,7 +1,17 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import TypeAdapter, ValidationError
 
 from app.api.dependencies import get_job_service
@@ -12,16 +22,32 @@ from app.schemas.jobs import (
     JobFailureResponse,
     JobStatusResponse,
     JobSubmissionResponse,
+    ProcessingConfigRequest,
     URLJobRequest,
 )
 from app.services.job_service import (
     IdempotencyConflictError,
     JobNotFoundError,
     JobService,
+    UnsupportedUploadError,
 )
+from app.storage.s3 import ObjectStorageError, UploadTooLargeError
 
 router = APIRouter(prefix="/jobs")
 JobServiceDependency = Annotated[JobService, Depends(get_job_service)]
+
+
+def _idempotency_key(value: str | None) -> str:
+    if value is None:
+        raise HTTPException(
+            status_code=422, detail="Idempotency-Key header is required"
+        )
+    try:
+        return TypeAdapter(IdempotencyKey).validate_python(value)
+    except ValidationError as error:
+        raise HTTPException(
+            status_code=422, detail="Idempotency-Key header is invalid"
+        ) from error
 
 
 @router.post(
@@ -37,20 +63,7 @@ async def create_url_job(
         str | None, Header(alias="Idempotency-Key")
     ] = None,
 ) -> JobSubmissionResponse:
-    if idempotency_key_header is None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Idempotency-Key header is required",
-        )
-    try:
-        idempotency_key = TypeAdapter(IdempotencyKey).validate_python(
-            idempotency_key_header
-        )
-    except ValidationError as error:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Idempotency-Key header is invalid",
-        ) from error
+    idempotency_key = _idempotency_key(idempotency_key_header)
     try:
         job, _created = await service.create_url_job(
             request.url, request.processing, idempotency_key
@@ -67,6 +80,52 @@ async def create_url_job(
         job_id=job.id,
         status=JobStatus(job.status),
         status_url=status_url,
+    )
+
+
+@router.post("/upload", response_model=JobSubmissionResponse, status_code=202)
+async def create_upload_job(
+    response: Response,
+    service: JobServiceDependency,
+    file: Annotated[UploadFile, File()],
+    candidate_fps: Annotated[float, Form(gt=0, le=60)] = 5.0,
+    selection_window_seconds: Annotated[float, Form(gt=0, le=3600)] = 1.0,
+    idempotency_key_header: Annotated[
+        str | None, Header(alias="Idempotency-Key")
+    ] = None,
+) -> JobSubmissionResponse:
+    key = _idempotency_key(idempotency_key_header)
+    try:
+        job, _created = await service.create_upload_job(
+            file,
+            file.filename or "video",
+            file.content_type or "application/octet-stream",
+            file.size,
+            ProcessingConfigRequest(
+                candidate_fps=candidate_fps,
+                selection_window_seconds=selection_window_seconds,
+            ),
+            key,
+        )
+    except UnsupportedUploadError as error:
+        raise HTTPException(status_code=415, detail=str(error)) from error
+    except UploadTooLargeError as error:
+        raise HTTPException(
+            status_code=413, detail="Uploaded video is too large"
+        ) from error
+    except ObjectStorageError as error:
+        raise HTTPException(
+            status_code=503, detail="Object storage is unavailable"
+        ) from error
+    except IdempotencyConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency-Key was already used for a different request",
+        ) from error
+    status_url = f"/api/v1/jobs/{job.id}"
+    response.headers["Location"] = status_url
+    return JobSubmissionResponse(
+        job_id=job.id, status=JobStatus(job.status), status_url=status_url
     )
 
 

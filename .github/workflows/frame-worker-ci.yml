@@ -1,0 +1,49 @@
+name: Frame Worker CI
+
+on:
+  pull_request:
+    paths:
+      - "services/frame-worker/**"
+      - ".github/workflows/frame-worker-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/frame-worker/**"
+      - ".github/workflows/frame-worker-ci.yml"
+
+jobs:
+  worker-quality:
+    runs-on: ubuntu-latest
+    env:
+      OBJECT_STORAGE_INTEGRATION: "1"
+      OBJECT_STORAGE_ENDPOINT: http://localhost:9000
+      OBJECT_STORAGE_ACCESS_KEY: frame_admin
+      OBJECT_STORAGE_SECRET_KEY: test_password
+      OBJECT_STORAGE_BUCKET: frame-intelligence-test
+    defaults:
+      run:
+        working-directory: services/frame-worker
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked --dev
+      - name: Start MinIO
+        run: >-
+          docker run -d --name frame-intelligence-ci-minio
+          -p 9000:9000
+          -e MINIO_ROOT_USER=frame_admin
+          -e MINIO_ROOT_PASSWORD=test_password
+          minio/minio:latest server /data
+      - name: Wait for MinIO
+        run: |
+          for attempt in {1..30}; do
+            curl --fail http://localhost:9000/minio/health/live && exit 0
+            sleep 2
+          done
+          exit 1
+      - run: uv run ruff check src tests
+      - run: uv run pytest
