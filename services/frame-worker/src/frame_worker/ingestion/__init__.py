@@ -16,3 +16,10 @@ __all__ = [
     "SourceResolver",
     "VideoSource",
 ]
+from frame_worker.ingestion.object_storage import (
+    ObjectStorageDownloader,
+    ObjectStorageVideoSource,
+    S3ObjectReference,
+)
+
+__all__ = ["ObjectStorageDownloader", "ObjectStorageVideoSource", "S3ObjectReference"]

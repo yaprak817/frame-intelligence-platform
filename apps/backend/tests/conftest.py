@@ -19,6 +19,23 @@ from app.models.processing_job import ProcessingJob  # noqa: E402
 from app.repositories.jobs import JobRepository  # noqa: E402
 from app.security.source_secrets import SourceSecretCipher  # noqa: E402
 from app.services.job_service import JobService  # noqa: E402
+from app.storage.s3 import S3ObjectReference  # noqa: E402
+
+
+class FakeStorage:
+    def __init__(self) -> None:
+        self.uploads: list[str] = []
+        self.deletes: list[S3ObjectReference] = []
+
+    async def upload(self, file, object_key: str) -> S3ObjectReference:
+        content = await file.read()
+        self.uploads.append(object_key)
+        return S3ObjectReference(
+            1, "test-bucket", object_key, None, '"etag"', len(content), "a" * 64
+        )
+
+    async def delete(self, reference: S3ObjectReference) -> None:
+        self.deletes.append(reference)
 
 
 class FakeJobRepository(JobRepository):
@@ -58,11 +75,17 @@ def cipher() -> SourceSecretCipher:
 
 
 @pytest.fixture
+def storage() -> FakeStorage:
+    return FakeStorage()
+
+
+@pytest.fixture
 def client(
     repository: FakeJobRepository,
     cipher: SourceSecretCipher,
+    storage: FakeStorage,
 ) -> Iterator[TestClient]:
-    service = JobService(repository, cipher)
+    service = JobService(repository, cipher, storage)
     app.dependency_overrides[get_job_service] = lambda: service
     with TestClient(app) as test_client:
         yield test_client
