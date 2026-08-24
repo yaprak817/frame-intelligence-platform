@@ -110,6 +110,10 @@ def test_processor_samples_and_saves_frames(
     assert summary.processing_seconds >= 0
     assert summary.speed_x is not None
     assert len(saved_files) == 2
+    assert [frame.index for frame in summary.frames] == [0, 1]
+    assert [frame.path for frame in summary.frames] == sorted(saved_files)
+    assert all(frame.path.parent == output_directory for frame in summary.frames)
+    assert all(frame.filename == frame.path.name for frame in summary.frames)
     assert extraction.closed is True
 
 
@@ -184,8 +188,7 @@ def run_adaptive_motion_count(
     scores: list[float],
 ) -> tuple[int, int]:
     frames = [
-        np.full((120, 160, 3), index, dtype=np.uint8)
-        for index in range(len(scores))
+        np.full((120, 160, 3), index, dtype=np.uint8) for index in range(len(scores))
     ]
     extraction = FakeExtraction(frames=frames, fps=5.0)
     processor = VideoProcessor(

@@ -191,3 +191,46 @@ def test_failed_job_returns_only_safe_failure(
         "message": "The video source timed out.",
     }
     assert "protected" not in response.text
+
+
+def test_succeeded_job_returns_safe_durable_result_reference(
+    client: TestClient,
+    repository,
+) -> None:
+    job_id = uuid4()
+    run_token = uuid4()
+    now = datetime.now(UTC)
+    result_reference = (
+        f"s3://frame-intelligence/jobs/{job_id}/results/{run_token}/manifest.json"
+    )
+    repository.jobs[job_id] = ProcessingJob(
+        id=job_id,
+        status=JobStatus.SUCCEEDED,
+        source_type="UPLOAD",
+        source_display="clip.mp4",
+        source_secret=None,
+        source_reference={"schema_version": 1, "bucket": "private"},
+        processing_config={},
+        created_at=now,
+        started_at=now,
+        completed_at=now,
+        failure_code=None,
+        failure_message=None,
+        attempt_count=1,
+        idempotency_scope="POST:/api/v1/jobs/upload",
+        idempotency_key="succeeded-result-01",
+        request_fingerprint="0" * 64,
+        result_reference=result_reference,
+        result_summary={"frames_saved": 1},
+        run_token=None,
+        lease_expires_at=None,
+        version=3,
+    )
+
+    response = client.get(f"/api/v1/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["result"] == result_reference
+    assert "C:\\" not in response.text
+    assert "/tmp/" not in response.text
+    assert "?" not in response.json()["result"]

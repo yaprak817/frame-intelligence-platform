@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 
@@ -47,6 +47,16 @@ class ProcessingConfig:
 
 
 @dataclass(frozen=True)
+class SelectedFrame:
+    index: int
+    timestamp_ms: int
+    width: int
+    height: int
+    filename: str
+    path: Path
+
+
+@dataclass(frozen=True)
 class ProcessingSummary:
     source_fps: float
     total_frames: int
@@ -57,6 +67,7 @@ class ProcessingSummary:
     duplicate_frames: int
     processing_seconds: float
     output_directory: Path
+    frames: tuple[SelectedFrame, ...] = ()
 
     @property
     def speed_x(self) -> float | None:
@@ -73,6 +84,7 @@ class _ProcessingCounts:
     shortlisted: int = 0
     selected: int = 0
     duplicates: int = 0
+    frames: list[SelectedFrame] = field(default_factory=list)
 
 
 class VideoProcessor:
@@ -112,6 +124,7 @@ class VideoProcessor:
             duplicate_frames=counts.duplicates,
             processing_seconds=perf_counter() - started_at,
             output_directory=output_directory,
+            frames=tuple(counts.frames),
         )
 
     def _process_candidates(
@@ -182,14 +195,16 @@ class VideoProcessor:
             previous_shortlisted_frame = candidate.frame
 
         best = max(evaluated, key=lambda item: item.quality.quality)
-        saved, duplicate, saved_frame, saved_time = self._save_candidate(
+        artifact, duplicate, saved_frame, saved_time = self._save_candidate(
             candidate=best,
             output_directory=output_directory,
             selected_count=counts.selected,
             last_saved_frame=last_saved_frame,
             last_saved_time=last_saved_time,
         )
-        counts.selected += int(saved)
+        if artifact is not None:
+            counts.frames.append(artifact)
+        counts.selected += int(artifact is not None)
         counts.duplicates += int(duplicate)
         return saved_frame, saved_time
 
@@ -200,7 +215,7 @@ class VideoProcessor:
         selected_count: int,
         last_saved_frame: np.ndarray | None,
         last_saved_time: float | None,
-    ) -> tuple[bool, bool, np.ndarray | None, float | None]:
+    ) -> tuple[SelectedFrame | None, bool, np.ndarray | None, float | None]:
         duplicate = is_near_duplicate(
             current_frame=candidate.frame,
             previous_frame=last_saved_frame,
@@ -208,7 +223,7 @@ class VideoProcessor:
             previous_time=last_saved_time,
         )
         if duplicate:
-            return False, True, last_saved_frame, last_saved_time
+            return None, True, last_saved_frame, last_saved_time
 
         enhanced = enhance_frame(candidate.frame, min_size=self.config.min_size)
         timestamp_ms = int(candidate.timestamp * 1000)
@@ -221,4 +236,16 @@ class VideoProcessor:
         if not success:
             raise RuntimeError(f"Could not encode frame: {filename}")
         encoded.tofile(output_path)
-        return True, False, candidate.frame.copy(), candidate.timestamp
+        return (
+            SelectedFrame(
+                index=selected_count,
+                timestamp_ms=timestamp_ms,
+                width=width,
+                height=height,
+                filename=filename,
+                path=output_path,
+            ),
+            False,
+            candidate.frame.copy(),
+            candidate.timestamp,
+        )

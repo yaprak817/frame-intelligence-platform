@@ -8,6 +8,10 @@ from uuid import UUID
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from frame_worker.artifacts.object_storage import (
+    ObjectStorageArtifactStore,
+    PersistedArtifacts,
+)
 from frame_worker.ingestion.adapters.direct_http import DirectHTTPVideoAdapter
 from frame_worker.ingestion.adapters.yt_dlp import YtDlpURLAdapter
 from frame_worker.ingestion.config import IngestionConfig
@@ -66,11 +70,13 @@ class JobRunner:
         processor_factory: Callable[[ProcessingConfig], VideoProcessor] = (
             VideoProcessor
         ),
+        artifact_store_factory: Callable[[], ObjectStorageArtifactStore] | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.repository_factory = repository_factory
         self.processor_factory = processor_factory
+        self.artifact_store_factory = artifact_store_factory or self._artifact_store
 
     def execute(self, job_id: UUID) -> bool:
         claim = self.repository.claim(job_id, self.settings.lease_seconds)
@@ -80,6 +86,8 @@ class JobRunner:
             return False
         job = claim.job
         assert job.run_token is not None
+        persisted: PersistedArtifacts | None = None
+        artifact_store: ObjectStorageArtifactStore | None = None
         try:
             config = processing_config(job.processing_config)
             source = self._source(job)
@@ -98,12 +106,23 @@ class JobRunner:
                     summary = SourceProcessingService(processor).process(
                         source, Path(workspace) / "frames"
                     )
-                if heartbeat.ownership_lost:
-                    raise OwnershipLostError
-            if not self.repository.succeed(
-                job.id, job.run_token, result_summary(summary)
-            ):
-                raise OwnershipLostError
+                    summary_document = result_summary(summary)
+                    artifact_store = self.artifact_store_factory()
+                    persisted = artifact_store.persist(
+                        job.id,
+                        job.run_token,
+                        summary,
+                        summary_document,
+                    )
+                    if heartbeat.ownership_lost:
+                        raise OwnershipLostError
+                    if not self.repository.succeed(
+                        job.id,
+                        job.run_token,
+                        summary_document,
+                        persisted.result_reference,
+                    ):
+                        raise OwnershipLostError
             logger.info(
                 "Job transition job_id=%s attempt=%s transition=RUNNING_TO_SUCCEEDED",
                 job.id,
@@ -111,6 +130,8 @@ class JobRunner:
             )
             return True
         except OwnershipLostError:
+            if persisted is not None and artifact_store is not None:
+                artifact_store.cleanup(persisted)
             logger.warning("Job completion rejected job_id=%s", job.id)
             return False
         except Exception as error:
@@ -166,6 +187,16 @@ class JobRunner:
             )
             return ObjectStorageVideoSource(reference, downloader, ingestion_config)
         raise ValueError("Unsupported job source type")
+
+    def _artifact_store(self) -> ObjectStorageArtifactStore:
+        return ObjectStorageArtifactStore.from_config(
+            endpoint=self.settings.object_storage_endpoint,
+            access_key=self.settings.object_storage_access_key,
+            secret_key=self.settings.object_storage_secret_key,
+            bucket=self.settings.object_storage_bucket,
+            region=self.settings.object_storage_region,
+            addressing_style=self.settings.object_storage_addressing_style,
+        )
 
 
 def processing_config(value: object) -> ProcessingConfig:

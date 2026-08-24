@@ -75,7 +75,8 @@ jobs from PostgreSQL before materializing URL or object-storage sources. Job
 state, retries, execution leases, and result summaries remain authoritative in
 PostgreSQL; Celery has no result backend.
 
-This orchestration stage records processing summaries but intentionally does
-not provide durable frame artifacts. Extracted frames are produced in a
-job-scoped temporary workspace and cleaned after processing. A follow-up change
-will persist frame manifests and artifacts to S3-compatible object storage.
+Selected frames are uploaded from the job-scoped temporary workspace to private
+S3-compatible storage. Each execution uses a run-scoped prefix and writes a
+versioned `manifest.json` last as its commit marker. PostgreSQL stores the
+manifest's stable internal `s3://` reference atomically with the result summary;
+local frame paths and presigned URLs are never persisted.

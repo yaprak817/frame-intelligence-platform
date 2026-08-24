@@ -4,6 +4,7 @@ import httpx
 from botocore.exceptions import BotoCoreError, ClientError
 from sqlalchemy.exc import OperationalError
 
+from frame_worker.artifacts.object_storage import ArtifactStorageError
 from frame_worker.ingestion.errors import (
     InvalidVideoSourceError,
     UnsafeVideoURLError,
@@ -33,6 +34,9 @@ SAFE_MESSAGES = {
 
 
 def classify_failure(error: BaseException, source_type: str) -> Failure:
+    if isinstance(error, ArtifactStorageError):
+        code = "STORAGE_UNAVAILABLE"
+        return Failure(code, SAFE_MESSAGES[code], True)
     if isinstance(error, UnsafeVideoURLError):
         code = "UNSAFE_URL"
     elif isinstance(error, UnsupportedVideoSourceError):

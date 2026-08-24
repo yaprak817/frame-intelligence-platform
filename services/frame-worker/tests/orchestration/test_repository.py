@@ -82,11 +82,19 @@ def test_stale_lease_reclaims_and_old_token_cannot_complete(tmp_path) -> None:
         assert claim.job is not None
         assert claim.job.run_token != old_token
         assert claim.job.attempt_count == 1
-        assert not repository.succeed(job_id, old_token, {"frames_saved": 1})
-        assert repository.succeed(job_id, claim.job.run_token, {"frames_saved": 2})
+        assert not repository.succeed(
+            job_id, old_token, {"frames_saved": 1}, "s3://bucket/old/manifest.json"
+        )
+        assert repository.succeed(
+            job_id,
+            claim.job.run_token,
+            {"frames_saved": 2},
+            "s3://bucket/new/manifest.json",
+        )
         stored = repository.get(job_id)
         assert stored and stored.status == JobStatus.SUCCEEDED
         assert stored.result_summary == {"frames_saved": 2}
+        assert stored.result_reference == "s3://bucket/new/manifest.json"
     finally:
         repository.close()
 

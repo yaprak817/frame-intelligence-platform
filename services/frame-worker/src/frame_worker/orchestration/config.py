@@ -38,6 +38,7 @@ class WorkerSettings:
     object_storage_endpoint: str
     object_storage_access_key: str
     object_storage_secret_key: str
+    object_storage_bucket: str
     object_storage_region: str
     object_storage_addressing_style: str
     max_download_bytes: int
@@ -74,6 +75,9 @@ class WorkerSettings:
             ),
             object_storage_secret_key=os.environ.get(
                 "OBJECT_STORAGE_SECRET_KEY", "change_me"
+            ),
+            object_storage_bucket=os.environ.get(
+                "OBJECT_STORAGE_BUCKET", "frame-intelligence"
             ),
             object_storage_region=os.environ.get("OBJECT_STORAGE_REGION", "us-east-1"),
             object_storage_addressing_style=os.environ.get(
