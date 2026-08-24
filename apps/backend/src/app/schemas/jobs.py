@@ -69,6 +69,12 @@ class JobFailureResponse(BaseModel):
     message: str
 
 
+class JobResultDescriptor(BaseModel):
+    available: bool
+    metadata_url: str
+    manifest_download_url: str
+
+
 class JobStatusResponse(BaseModel):
     id: UUID
     status: JobStatus
@@ -78,4 +84,4 @@ class JobStatusResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     failure: JobFailureResponse | None
-    result: str | None
+    result: JobResultDescriptor | None

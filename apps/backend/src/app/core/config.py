@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     )
     job_source_encryption_key: str
     object_storage_endpoint: str = "http://localhost:9000"
+    object_storage_external_endpoint: str = "http://localhost:9000"
     object_storage_access_key: str = "frame_admin"
     object_storage_secret_key: str = "change_me"
     object_storage_bucket: str = "frame-intelligence"
@@ -34,6 +35,7 @@ class Settings(BaseSettings):
     object_storage_addressing_style: str = "path"
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024
     object_storage_multipart_chunk_bytes: int = 8 * 1024 * 1024
+    result_artifact_url_ttl_seconds: int = 300
     celery_broker_url: str = "redis://localhost:6379/0"
     outbox_poll_interval_seconds: float = 1.0
     outbox_batch_size: int = 10
@@ -48,15 +50,34 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_storage(self) -> "Settings":
-        scheme = urlsplit(self.object_storage_endpoint).scheme
-        if scheme not in {"http", "https"}:
-            raise ValueError("OBJECT_STORAGE_ENDPOINT must use http or https")
+        internal_url = urlsplit(self.object_storage_endpoint)
+        external_url = urlsplit(self.object_storage_external_endpoint)
+        scheme = internal_url.scheme
+        external_scheme = external_url.scheme
+        if scheme not in {"http", "https"} or external_scheme not in {"http", "https"}:
+            raise ValueError("Object storage endpoints must use http or https")
+        for endpoint in (internal_url, external_url):
+            if (
+                not endpoint.hostname
+                or endpoint.username is not None
+                or endpoint.password is not None
+                or endpoint.query
+                or endpoint.fragment
+            ):
+                raise ValueError("Object storage endpoint is invalid")
         if (
             self.environment.lower() not in {"development", "test"}
             and scheme != "https"
         ):
             raise ValueError(
                 "OBJECT_STORAGE_ENDPOINT must use https outside development"
+            )
+        if (
+            self.environment.lower() not in {"development", "test"}
+            and external_scheme != "https"
+        ):
+            raise ValueError(
+                "OBJECT_STORAGE_EXTERNAL_ENDPOINT must use https outside development"
             )
         if self.object_storage_addressing_style not in {"path", "virtual"}:
             raise ValueError("OBJECT_STORAGE_ADDRESSING_STYLE must be path or virtual")
@@ -65,6 +86,10 @@ class Settings(BaseSettings):
         if self.object_storage_multipart_chunk_bytes < 5 * 1024 * 1024:
             raise ValueError(
                 "OBJECT_STORAGE_MULTIPART_CHUNK_BYTES must be at least 5 MiB"
+            )
+        if not 30 <= self.result_artifact_url_ttl_seconds <= 900:
+            raise ValueError(
+                "RESULT_ARTIFACT_URL_TTL_SECONDS must be between 30 and 900"
             )
         if self.outbox_poll_interval_seconds <= 0:
             raise ValueError("OUTBOX_POLL_INTERVAL_SECONDS must be greater than zero")

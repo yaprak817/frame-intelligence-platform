@@ -154,7 +154,9 @@ def test_unknown_or_invalid_job_id_returns_404(client: TestClient, job_id: str) 
     response = client.get(f"/api/v1/jobs/{job_id}")
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "Job not found"}
+    assert response.json() == {
+        "detail": {"code": "JOB_NOT_FOUND", "message": "Job not found"}
+    }
 
 
 def test_failed_job_returns_only_safe_failure(
@@ -193,7 +195,7 @@ def test_failed_job_returns_only_safe_failure(
     assert "protected" not in response.text
 
 
-def test_succeeded_job_returns_safe_durable_result_reference(
+def test_succeeded_job_returns_safe_result_descriptor(
     client: TestClient,
     repository,
 ) -> None:
@@ -230,7 +232,13 @@ def test_succeeded_job_returns_safe_durable_result_reference(
     response = client.get(f"/api/v1/jobs/{job_id}")
 
     assert response.status_code == 200
-    assert response.json()["result"] == result_reference
+    assert response.json()["result"] == {
+        "available": True,
+        "metadata_url": f"/api/v1/jobs/{job_id}/result",
+        "manifest_download_url": f"/api/v1/jobs/{job_id}/result/manifest",
+    }
+    assert result_reference not in response.text
+    assert "s3://" not in response.text
     assert "C:\\" not in response.text
     assert "/tmp/" not in response.text
     assert "?" not in response.json()["result"]
