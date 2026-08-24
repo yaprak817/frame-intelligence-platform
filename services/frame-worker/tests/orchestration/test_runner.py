@@ -7,6 +7,10 @@ from uuid import uuid4
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from frame_worker.artifacts.object_storage import (
+    ArtifactStorageError,
+    PersistedArtifacts,
+)
 from frame_worker.ingestion.errors import (
     InvalidVideoSourceError,
     UnsafeVideoURLError,
@@ -26,7 +30,7 @@ from frame_worker.orchestration.runner import (
     result_summary,
     storage_reference,
 )
-from frame_worker.processing.pipeline import ProcessingSummary
+from frame_worker.processing.pipeline import ProcessingSummary, SelectedFrame
 
 
 def settings(tmp_path) -> WorkerSettings:
@@ -38,6 +42,7 @@ def settings(tmp_path) -> WorkerSettings:
         object_storage_endpoint="http://localhost:9000",
         object_storage_access_key="test",
         object_storage_secret_key="test",
+        object_storage_bucket="test-results",
         object_storage_region="us-east-1",
         object_storage_addressing_style="path",
         max_download_bytes=1024,
@@ -70,9 +75,11 @@ def job() -> JobRecord:
 
 
 class FakeRepository:
-    def __init__(self, record=None) -> None:
+    def __init__(self, record=None, accept_success=True) -> None:
         self.record = record
+        self.accept_success = accept_success
         self.summary = None
+        self.result_reference = None
         self.failed = None
         self.released = False
         self.heartbeats = 0
@@ -84,8 +91,11 @@ class FakeRepository:
         self.heartbeats += 1
         return True
 
-    def succeed(self, _job_id, _token, summary):
+    def succeed(self, _job_id, _token, summary, result_reference):
+        if not self.accept_success:
+            return False
         self.summary = summary
+        self.result_reference = result_reference
         return True
 
     def fail(self, _job_id, _token, code, message):
@@ -118,8 +128,47 @@ class FakeProcessor:
 
     def process(self, _video_path, output_directory):
         output_directory.mkdir(parents=True)
-        (output_directory / "frame.jpg").write_bytes(b"frame")
-        return ProcessingSummary(30, 60, 2.0, 10, 4, 3, 1, 0.5, output_directory)
+        frames = []
+        for index in range(3):
+            filename = f"frame_{index:06d}_{index * 1000}ms_640x480.jpg"
+            path = output_directory / filename
+            path.write_bytes(f"frame-{index}".encode())
+            frames.append(SelectedFrame(index, index * 1000, 640, 480, filename, path))
+        return ProcessingSummary(
+            30,
+            60,
+            2.0,
+            10,
+            4,
+            3,
+            1,
+            0.5,
+            output_directory,
+            tuple(frames),
+        )
+
+
+class FakeArtifactStore:
+    def __init__(self, error=None) -> None:
+        self.error = error
+        self.cleaned = False
+        self.persisted_while_files_exist = False
+
+    def persist(self, job_id, run_token, summary, summary_document):
+        if self.error:
+            raise self.error
+        self.persisted_while_files_exist = all(
+            frame.path.exists() for frame in summary.frames
+        )
+        prefix = f"jobs/{job_id}/results/{run_token}"
+        return PersistedArtifacts(
+            f"s3://test-results/{prefix}/manifest.json",
+            prefix,
+            (f"{prefix}/manifest.json",),
+        )
+
+    def cleanup(self, _artifacts):
+        self.cleaned = True
 
 
 class TestRunner(JobRunner):
@@ -136,6 +185,7 @@ class TestRunner(JobRunner):
 def test_success_persists_summary_and_cleans_workspace(tmp_path) -> None:
     record = job()
     repository = FakeRepository(record)
+    artifacts = FakeArtifactStore()
     video = tmp_path / "source.mp4"
     video.write_bytes(b"video")
     runner = TestRunner(
@@ -143,6 +193,7 @@ def test_success_persists_summary_and_cleans_workspace(tmp_path) -> None:
         repository,
         lambda: repository,
         FakeProcessor,
+        lambda: artifacts,
         source=FakeSource(video),
     )
     assert runner.execute(record.id)
@@ -154,6 +205,8 @@ def test_success_persists_summary_and_cleans_workspace(tmp_path) -> None:
         "processing_seconds": 0.5,
         "duration_seconds": 2.0,
     }
+    assert repository.result_reference.endswith("/manifest.json")
+    assert artifacts.persisted_while_files_exist
     assert not list(tmp_path.glob("frame-job-*"))
 
 
@@ -173,6 +226,47 @@ def test_retryable_storage_failure_releases_claim(tmp_path) -> None:
     assert repository.released
     assert captured.value.failure.code == "STORAGE_UNAVAILABLE"
     assert "secret endpoint" not in captured.value.failure.message
+
+
+def test_artifact_storage_failure_is_retryable_and_cleans_workspace(tmp_path) -> None:
+    record = job()
+    repository = FakeRepository(record)
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    runner = TestRunner(
+        settings(tmp_path),
+        repository,
+        lambda: repository,
+        FakeProcessor,
+        lambda: FakeArtifactStore(ArtifactStorageError("secret endpoint")),
+        source=FakeSource(video),
+    )
+    with pytest.raises(RetryableExecutionError) as captured:
+        runner.execute(record.id)
+    assert captured.value.failure.code == "STORAGE_UNAVAILABLE"
+    assert captured.value.failure.retryable
+    assert repository.released
+    assert repository.result_reference is None
+    assert not list(tmp_path.glob("frame-job-*"))
+
+
+def test_ownership_loss_rejects_reference_and_cleans_current_run(tmp_path) -> None:
+    record = job()
+    repository = FakeRepository(record, accept_success=False)
+    artifacts = FakeArtifactStore()
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    runner = TestRunner(
+        settings(tmp_path),
+        repository,
+        lambda: repository,
+        FakeProcessor,
+        lambda: artifacts,
+        source=FakeSource(video),
+    )
+    assert not runner.execute(record.id)
+    assert repository.result_reference is None
+    assert artifacts.cleaned
 
 
 def test_heartbeat_stops_and_updates_lease() -> None:
@@ -223,6 +317,7 @@ def test_result_summary_never_contains_output_path(tmp_path) -> None:
         (InvalidVideoSourceError("raw secret"), "INVALID_VIDEO"),
         (VideoTooLargeError("raw secret"), "SOURCE_TOO_LARGE"),
         (VideoDownloadError("HTTP status 503 raw secret"), "DOWNLOAD_FAILED"),
+        (ArtifactStorageError("raw secret"), "STORAGE_UNAVAILABLE"),
     ],
 )
 def test_failure_mapping_is_stable_and_sanitized(error, code) -> None:

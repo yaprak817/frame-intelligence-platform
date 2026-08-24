@@ -161,12 +161,19 @@ class JobRepository:
             )
             return result.rowcount == 1
 
-    def succeed(self, job_id: UUID, run_token: UUID, summary: dict[str, Any]) -> bool:
+    def succeed(
+        self,
+        job_id: UUID,
+        run_token: UUID,
+        summary: dict[str, Any],
+        result_reference: str,
+    ) -> bool:
         return self._finish(
             job_id,
             run_token,
             status=JobStatus.SUCCEEDED,
             result_summary=summary,
+            result_reference=result_reference,
             failure_code=None,
             failure_message=None,
         )

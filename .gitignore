@@ -255,6 +255,10 @@ data/
 uploads/
 outputs/
 artifacts/
+!services/frame-worker/src/frame_worker/artifacts/
+!services/frame-worker/src/frame_worker/artifacts/*.py
+!services/frame-worker/tests/artifacts/
+!services/frame-worker/tests/artifacts/*.py
 storage/
 !apps/backend/src/app/storage/
 !apps/backend/src/app/storage/*.py
