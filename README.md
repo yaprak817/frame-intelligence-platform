@@ -19,6 +19,31 @@ The initial prototype includes:
 - Temporal duplicate detection
 - Frame quality scoring
 - Basic image enhancement
+- Browser-based local upload and generic URL job submission
+- Accessible asynchronous job status tracking
+
+## Frontend MVP
+
+The Next.js App Router application lives in `apps/frontend`. It supports local video
+uploads with progress and cancellation, generic HTTP/HTTPS URL submission, and job
+status polling for every backend state. Result viewing is intentionally reserved for
+a later frontend phase.
+
+Browser API calls use only same-origin `/api/v1/*` paths. A Node runtime Route Handler
+resolves `BACKEND_INTERNAL_URL` at request time and streams those requests to the FastAPI
+service through strict request/response header allowlists without exposing its internal hostname. In Compose this target defaults to
+`http://backend:8000`; when running the frontend directly, set it to
+`http://localhost:8000`. Do not introduce a `NEXT_PUBLIC_BACKEND_URL`.
+
+```bash
+cd apps/frontend
+npm ci
+npm run dev
+```
+
+The current UI, like the API, is intended only for a single-tenant trusted-client
+deployment. It has no login, ownership boundary, or persistent browser-side job
+history and must not be exposed as a multi-tenant public application.
 
 ## Planned Architecture
 
