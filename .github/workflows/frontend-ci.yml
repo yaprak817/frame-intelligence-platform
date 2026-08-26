@@ -1,0 +1,48 @@
+name: Frontend CI
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - "apps/frontend/**"
+      - "compose.yaml"
+      - ".env.example"
+      - ".github/workflows/frontend-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/frontend/**"
+      - "compose.yaml"
+      - ".env.example"
+      - ".github/workflows/frontend-ci.yml"
+
+jobs:
+  frontend-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    env:
+      BACKEND_INTERNAL_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: npm ci
+      - name: Verify frontend library sources are tracked
+        working-directory: .
+        run: |
+          test -n "$(git ls-files 'apps/frontend/src/lib/**')"
+          ! find apps/frontend/src/lib -type f -print0 | xargs -0 git check-ignore --quiet
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:proxy-integration
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

@@ -14,7 +14,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -241,6 +241,10 @@ node_modules/
 .next/
 dist/
 coverage/
+playwright-report/
+test-results/
+npm-debug.log*
+*.tsbuildinfo
 
 # IDE
 .vscode/
