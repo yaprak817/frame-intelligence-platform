@@ -32,4 +32,10 @@ describe("job tracker", () => {
     render(<JobTracker jobId="missing" />);
     expect(screen.getByRole("alert")).toHaveTextContent("İş bulunamadı.");
   });
+
+  it("links successful jobs to the result page", () => {
+    useJobPolling.mockReturnValue({ job: response("SUCCEEDED"), error: null, loading: false });
+    render(<JobTracker jobId="job-1" />);
+    expect(screen.getByRole("link", { name: "Sonuçları görüntüle" })).toHaveAttribute("href", "/jobs/job-1/result");
+  });
 });

@@ -44,3 +44,40 @@ export interface JobStatusResponse {
 export interface ApiErrorPayload {
   detail?: string | { code?: string; message?: string } | unknown[];
 }
+
+export interface ResultSummary {
+  frames_saved: number;
+  candidates: number;
+  shortlisted: number;
+  duplicates_removed: number;
+  processing_seconds: number;
+  duration_seconds: number;
+}
+
+export interface ResultFrame {
+  index: number;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  timestamp_ms: number;
+  width: number;
+  height: number;
+  access_url: string;
+}
+
+export interface PublicResultManifest {
+  schema_version: 1;
+  job_id: string;
+  created_at: string;
+  summary: ResultSummary;
+  frames: ResultFrame[];
+}
+
+export interface FrameAccessResponse {
+  url: string;
+  expires_at: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+}

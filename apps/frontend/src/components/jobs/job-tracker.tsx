@@ -10,7 +10,7 @@ const STATUS_COPY: Record<JobStatus, { label: string; detail: string }> = {
   PENDING_DISPATCH: { label: "İş sıraya gönderiliyor", detail: "İş kaydedildi ve işleme kuyruğuna aktarılıyor." },
   QUEUED: { label: "İşleme sırası bekleniyor", detail: "Video işleme için hazır ve worker bekliyor." },
   RUNNING: { label: "Video işleniyor", detail: "Kaliteli ve çeşitli kareler seçiliyor." },
-  SUCCEEDED: { label: "İşleme tamamlandı", detail: "Sonuç hazır. Sonuç görüntüleme sonraki frontend fazında sunulacak." },
+  SUCCEEDED: { label: "İşleme tamamlandı", detail: "Sonuç hazır. Analiz özetini ve seçilen kareleri görüntüleyebilirsiniz." },
   FAILED: { label: "İşleme tamamlanamadı", detail: "Video için sonuç üretilemedi." },
 };
 
@@ -50,7 +50,7 @@ export function JobTracker({ jobId }: { jobId: string }) {
                 <span>Güvenle yeni bir iş oluşturup tekrar deneyebilirsiniz.</span>
               </div>
             )}
-            {job.status === "SUCCEEDED" && <div className="success-panel" role="status">Sonuç hazır.</div>}
+            {job.status === "SUCCEEDED" && <div className="success-panel" role="status"><span>Sonuç hazır.</span><Link className="button primary result-link" href={`/jobs/${encodeURIComponent(jobId)}/result`}>Sonuçları görüntüle</Link></div>}
           </>
         )}
       </section>

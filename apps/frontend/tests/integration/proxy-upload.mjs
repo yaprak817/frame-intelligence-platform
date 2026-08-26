@@ -43,6 +43,37 @@ function spawnTracked(executable, args, options = {}) {
   return child;
 }
 
+async function readyMessage(child, label) {
+  const [message] = await bounded(once(child, "message"), `${label} ready handshake`);
+  if (!message || message.ready !== true || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
+    throw new Error(`${label} sent an invalid ready handshake`);
+  }
+  return message;
+}
+
+function positiveSafePid(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} sent an invalid process id`);
+  return value;
+}
+
+function pidExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function waitForPidExit(pid, label, timeoutMs = 5_000) {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (!pidExists(pid)) return;
+    await delay(25);
+  }
+  throw new Error(`${label} process ${pid} remained alive`);
+}
+
 async function runTrackedChild(child, action) {
   if (!trackedProcesses.has(child)) throw new Error("refusing to manage an untracked child process");
   let actionError;
@@ -230,22 +261,43 @@ async function verifyResponseCancel() {
 }
 
 async function verifyCleanupPaths() {
-  const normal = spawnTracked(process.execPath, ["-e", "setInterval(() => {}, 1000); process.on('SIGTERM', () => process.exit(0))"], { stdio: "ignore" });
+  const normal = spawnTracked(process.execPath, ["-e", "setInterval(() => {}, 1000); process.on('SIGTERM', () => process.exit(0)); process.send({ready:true})"], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
   await withFinalCleanup(normal, async (child) => {
     await runTrackedChild(child, async (trackedChild) => {
+      await readyMessage(trackedChild, "normal cleanup fixture");
       const result = await terminateProcess(trackedChild, { gracefulMs: 1_000 });
       if (result.forced) throw new Error("normal cleanup unexpectedly required force");
     });
   });
 
-  const stubborn = spawnTracked(process.execPath, ["-e", "setInterval(() => {}, 1000); process.on('SIGTERM', () => {})"], { stdio: "ignore" });
+  const invalidHandshake = spawnTracked(process.execPath, ["-e", "process.send({ready:true,grandchildPid:null});setInterval(()=>{},1000)"], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  await withFinalCleanup(invalidHandshake, async (child) => {
+    let rejected = false;
+    try {
+      const message = await readyMessage(child, "invalid PID fixture");
+      positiveSafePid(message.grandchildPid, "invalid PID fixture");
+    } catch { rejected = true; }
+    if (!rejected) throw new Error("invalid PID fixture was accepted as successful cleanup");
+  });
+
+  const stubbornScript = "const {spawn}=require('node:child_process');const grandchild=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});setInterval(()=>{},1000);process.on('SIGTERM',()=>{});process.send({ready:true,grandchildPid:grandchild.pid})";
+  const stubborn = spawnTracked(process.execPath, ["-e", stubbornScript], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
   await withFinalCleanup(stubborn, async (child) => {
-    await delay(100);
     await runTrackedChild(child, async (trackedChild) => {
-      const result = await terminateProcess(trackedChild, { gracefulMs: 100, forcedMs: 5_000 });
+      const message = await readyMessage(trackedChild, "forced cleanup fixture");
+      const result = process.platform === "win32"
+        ? (await forceTerminateProcess(trackedChild, 5_000), { forced: true })
+        : await terminateProcess(trackedChild, { gracefulMs: 100, forcedMs: 5_000 });
       if (!result.forced) throw new Error("forced cleanup path was not exercised");
+      await waitForPidExit(positiveSafePid(message.grandchildPid, "forced cleanup fixture"), "forced cleanup grandchild");
     });
   });
+
+  for (const invalidPid of [undefined, null, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    let rejected = false;
+    try { positiveSafePid(invalidPid, "invalid PID fixture"); } catch { rejected = true; }
+    if (!rejected) throw new Error("invalid PID fixture was accepted as successful cleanup");
+  }
 
   const listener = spawnTracked(process.execPath, ["-e", "const net=require('node:net');const server=net.createServer();server.listen(0,'127.0.0.1',()=>process.send(server.address().port));process.on('SIGTERM',()=>{});"], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
   let listenerPort;
