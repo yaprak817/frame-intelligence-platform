@@ -10,6 +10,10 @@ const CODE_MESSAGES: Record<string, string> = {
   DOWNLOAD_FAILED: "Video indirilemedi.",
   PROCESSING_FAILED: "Video işlenirken bir sorun oluştu.",
   STORAGE_UNAVAILABLE: "Dosya servisine şu anda ulaşılamıyor.",
+  RESULT_NOT_READY: "Sonuç henüz hazır değil.",
+  RESULT_UNAVAILABLE: "Sonuçlara şu anda ulaşılamıyor.",
+  MANIFEST_INVALID: "Sonuç verisi güvenli biçimde doğrulanamadı.",
+  ARTIFACT_NOT_FOUND: "İstenen sonuç karesi bulunamadı.",
 };
 
 const STATUS_MESSAGES: Record<number, string> = {
@@ -18,6 +22,7 @@ const STATUS_MESSAGES: Record<number, string> = {
   413: "Video izin verilen boyuttan büyük.",
   415: "Bu video biçimi desteklenmiyor.",
   422: "Lütfen form alanlarını kontrol edin.",
+  502: "Sonuç servisine şu anda ulaşılamıyor. Lütfen yeniden deneyin.",
   503: "Hizmete şu anda ulaşılamıyor. Lütfen yeniden deneyin.",
 };
 
