@@ -103,7 +103,11 @@ async def create_url_job(
     )
 
 
-@router.post("/upload", response_model=JobSubmissionResponse, status_code=202)
+@router.post(
+    "/upload",
+    response_model=JobSubmissionResponse,
+    status_code=202,
+)
 async def create_upload_job(
     response: Response,
     service: JobServiceDependency,
@@ -190,7 +194,10 @@ def _status_response(job: ProcessingJob) -> JobStatusResponse:
     )
 
 
-@router.get("/{job_id}/result", response_model=PublicResultManifest)
+@router.get(
+    "/{job_id}/result",
+    response_model=PublicResultManifest,
+)
 async def get_job_result(
     job_id: str,
     service: ResultServiceDependency,
