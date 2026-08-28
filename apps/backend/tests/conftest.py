@@ -88,5 +88,13 @@ def client(
     service = JobService(repository, cipher, storage)
     app.dependency_overrides[get_job_service] = lambda: service
     with TestClient(app) as test_client:
+
+        class AllowingLimiter:
+            async def check(self, **_kwargs):
+                from app.security.rate_limit import RateLimitDecision
+
+                return RateLimitDecision(True, 1)
+
+        test_client.app.state.rate_limiter = AllowingLimiter()
         yield test_client
     app.dependency_overrides.clear()

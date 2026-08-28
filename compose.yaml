@@ -26,9 +26,18 @@ services:
       - -c
       - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
     environment: &backend-environment
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-frame_user}:${POSTGRES_PASSWORD:-change_me}@postgres:5432/${POSTGRES_DB:-frame_intelligence}
       JOB_SOURCE_ENCRYPTION_KEY: ${JOB_SOURCE_ENCRYPTION_KEY}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-[]}
+      CORS_ALLOW_CREDENTIALS: ${CORS_ALLOW_CREDENTIALS:-false}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-[]}
+      RATE_LIMIT_SUBMISSION_REQUESTS: ${RATE_LIMIT_SUBMISSION_REQUESTS:-10}
+      RATE_LIMIT_RESULT_REQUESTS: ${RATE_LIMIT_RESULT_REQUESTS:-60}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      DEPENDENCY_TIMEOUT_SECONDS: ${DEPENDENCY_TIMEOUT_SECONDS:-2}
       OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:-http://minio:9000}
       OBJECT_STORAGE_EXTERNAL_ENDPOINT: ${OBJECT_STORAGE_EXTERNAL_ENDPOINT:-http://localhost:9000}
       OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-frame_admin}
@@ -45,10 +54,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/ready')"]
       interval: 10s
       timeout: 5s
       retries: 10

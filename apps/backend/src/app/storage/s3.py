@@ -186,6 +186,7 @@ class S3ResultObjectStorage:
         bucket: str,
         region: str,
         addressing_style: str,
+        dependency_timeout_seconds: float = 2.0,
         internal_client: Any | None = None,
         signing_client: Any | None = None,
     ) -> None:
@@ -197,11 +198,20 @@ class S3ResultObjectStorage:
             "config": Config(
                 signature_version="s3v4",
                 s3={"addressing_style": addressing_style},
+                connect_timeout=dependency_timeout_seconds,
+                read_timeout=dependency_timeout_seconds,
+                retries={"total_max_attempts": 1, "mode": "standard"},
             ),
         }
         self._owns_internal_client = internal_client is None
         self._owns_signing_client = signing_client is None
         self._closed = False
+        self._clients_closed = False
+        self._ready_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
+        self._ready_task: asyncio.Task[None] | None = None
+        self._deferred_close_task: asyncio.Task[None] | None = None
+        self._shutdown_wait_seconds = dependency_timeout_seconds * 2 + 0.1
         self._internal_client = internal_client or boto3.client(
             "s3", endpoint_url=internal_endpoint, **client_kwargs
         )
@@ -221,12 +231,79 @@ class S3ResultObjectStorage:
         if self._closed:
             return
         self._closed = True
-        clients = []
-        if self._owns_internal_client:
-            clients.append(self._internal_client)
-        if self._owns_signing_client:
-            clients.append(self._signing_client)
-        await asyncio.gather(*(asyncio.to_thread(client.close) for client in clients))
+        task = self._ready_task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=self._shutdown_wait_seconds
+                )
+            except TimeoutError:
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+        if task is not None:
+            self._consume_probe_result(task)
+        await self._close_clients()
+
+    async def _close_clients(self) -> None:
+        async with self._close_lock:
+            if self._clients_closed:
+                return
+            self._clients_closed = True
+            clients = []
+            if self._owns_internal_client:
+                clients.append(self._internal_client)
+            if self._owns_signing_client:
+                clients.append(self._signing_client)
+            await asyncio.gather(
+                *(asyncio.to_thread(client.close) for client in clients)
+            )
+
+    def _probe_done(self, task: asyncio.Task[None]) -> None:
+        self._consume_probe_result(task)
+        if self._closed and not self._clients_closed:
+            if self._deferred_close_task is None:
+                deferred = task.get_loop().create_task(self._close_clients())
+                self._deferred_close_task = deferred
+                deferred.add_done_callback(self._deferred_close_done)
+
+    def _deferred_close_done(self, task: asyncio.Task[None]) -> None:
+        self._consume_probe_result(task)
+        if self._deferred_close_task is task:
+            self._deferred_close_task = None
+
+    @staticmethod
+    def _consume_probe_result(task: asyncio.Task[None]) -> None:
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+
+    async def ready(self) -> None:
+        task = await self._ready_probe_task()
+        await asyncio.shield(task)
+
+    async def _ready_probe_task(self) -> asyncio.Task[None]:
+        async with self._ready_lock:
+            if self._closed:
+                raise ObjectStorageError("Object storage is unavailable")
+            if self._ready_task is None or self._ready_task.done():
+                if self._ready_task is not None:
+                    self._consume_probe_result(self._ready_task)
+                self._ready_task = asyncio.create_task(self._probe_ready())
+                self._ready_task.add_done_callback(self._probe_done)
+            return self._ready_task
+
+    async def _probe_ready(self) -> None:
+        try:
+            await asyncio.to_thread(
+                self._internal_client.head_bucket,
+                Bucket=self.bucket,
+            )
+        except Exception as error:
+            raise ObjectStorageError("Object storage request failed") from error
 
     async def head(self, object_key: str) -> ObjectMetadata:
         try:

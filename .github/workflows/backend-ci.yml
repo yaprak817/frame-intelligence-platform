@@ -1,5 +1,8 @@
 name: Backend CI
 
+permissions:
+  contents: read
+
 on:
   pull_request:
     paths:
@@ -21,6 +24,7 @@ jobs:
   backend-quality:
     name: Backend Quality Checks
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -56,6 +60,8 @@ jobs:
       OBJECT_STORAGE_SECRET_KEY: test_password
       OBJECT_STORAGE_BUCKET: frame-intelligence-test
       CELERY_BROKER_URL: redis://localhost:6379/0
+      REDIS_URL: redis://localhost:6379/15
+      REDIS_INTEGRATION: "1"
       BROKER_INTEGRATION: "1"
 
     defaults:
