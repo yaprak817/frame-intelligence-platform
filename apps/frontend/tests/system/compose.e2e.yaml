@@ -1,0 +1,38 @@
+services:
+  frontend:
+    container_name: !reset null
+    ports: !override
+      - "127.0.0.1:${FULL_STACK_E2E_FRONTEND_PORT}:3000"
+    restart: "no"
+
+  backend:
+    container_name: !reset null
+    ports: !reset []
+    restart: "no"
+
+  outbox-publisher:
+    container_name: !reset null
+    restart: "no"
+
+  frame-worker:
+    container_name: !reset null
+    restart: "no"
+
+  postgres:
+    container_name: !reset null
+    ports: !reset []
+    restart: "no"
+
+  redis:
+    container_name: !reset null
+    ports: !reset []
+    restart: "no"
+
+  minio:
+    container_name: !reset null
+    ports: !override
+      - "127.0.0.1:${FULL_STACK_E2E_MINIO_PORT}:9000"
+    restart: "no"
+
+  minio-init:
+    restart: "no"

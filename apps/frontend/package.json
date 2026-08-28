@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "test:proxy-integration": "node tests/integration/proxy-upload.mjs"
+    "test:proxy-integration": "node tests/integration/proxy-upload.mjs",
+    "test:full-stack-e2e": "node tests/system/full-stack-e2e.mjs"
   },
   "dependencies": {
     "next": "16.3.2",
