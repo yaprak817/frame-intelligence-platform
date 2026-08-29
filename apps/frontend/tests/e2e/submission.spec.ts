@@ -14,12 +14,13 @@ test("submits a URL through same-origin API and reaches success", async ({ page 
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", status, source_type: "URL", source: "https://example.com/video", created_at: "2026-08-24T10:00:00Z", started_at: null, completed_at: null, failure: null, result: status === "SUCCEEDED" ? { available: true, metadata_url: "/api/v1/jobs/1/result", manifest_download_url: "/api/v1/jobs/1/result/manifest" } : null }) });
   });
   await page.goto("/");
+  const expectedOrigin = new URL(page.url()).origin;
   await page.getByRole("tab", { name: "Video URL’si" }).click();
   await page.getByLabel("Video bağlantısı").fill("https://example.com/video");
   await page.getByRole("button", { name: "İşi başlat" }).click();
   await expect(page).toHaveURL(/\/jobs\/11111111/);
   await expect(page.getByRole("heading", { name: "İşleme tamamlandı" })).toBeVisible({ timeout: 8_000 });
-  expect(requests.every((url) => new URL(url).origin === "http://127.0.0.1:3000")).toBe(true);
+  expect(requests.every((url) => new URL(url).origin === expectedOrigin)).toBe(true);
   expect(requests.join(" ")).not.toContain("backend:8000");
   expect(requests.join(" ")).not.toContain("minio");
 });

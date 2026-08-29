@@ -1,0 +1,124 @@
+name: Production deployment validation
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - ".gitignore"
+      - "compose.production.yaml"
+      - ".env.production.example"
+      - "deploy/**"
+      - "docs/production-operations.md"
+      - "apps/**/Dockerfile"
+      - "services/frame-worker/Dockerfile"
+      - "apps/backend/src/app/core/config.py"
+      - "apps/backend/src/app/security/rate_limit.py"
+      - "apps/backend/tests/test_rate_limit.py"
+      - "apps/backend/tests/test_production_security_config.py"
+      - "apps/frontend/tests/system/**"
+      - "apps/frontend/package.json"
+      - "apps/frontend/playwright.config.ts"
+      - "apps/frontend/tests/e2e/submission.spec.ts"
+      - "apps/frontend/src/app/api/v1/**"
+      - "apps/frontend/tests/unit/route-proxy.test.ts"
+      - "apps/frontend/tests/integration/proxy-upload.mjs"
+      - "apps/backend/src/app/db/migrate.py"
+      - "apps/backend/tests/test_migration_lock.py"
+      - ".github/workflows/production-deployment.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".gitignore"
+      - "compose.production.yaml"
+      - ".env.production.example"
+      - "deploy/**"
+      - "docs/production-operations.md"
+      - "apps/**/Dockerfile"
+      - "services/frame-worker/Dockerfile"
+      - "apps/backend/src/app/core/config.py"
+      - "apps/backend/src/app/security/rate_limit.py"
+      - "apps/backend/tests/test_rate_limit.py"
+      - "apps/backend/tests/test_production_security_config.py"
+      - "apps/frontend/tests/system/**"
+      - "apps/frontend/package.json"
+      - "apps/frontend/playwright.config.ts"
+      - "apps/frontend/tests/e2e/submission.spec.ts"
+      - "apps/frontend/src/app/api/v1/**"
+      - "apps/frontend/tests/unit/route-proxy.test.ts"
+      - "apps/frontend/tests/integration/proxy-upload.mjs"
+      - "apps/backend/src/app/db/migrate.py"
+      - "apps/backend/tests/test_migration_lock.py"
+      - ".github/workflows/production-deployment.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: production-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  production-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PRODUCTION_E2E: "1"
+      FULL_STACK_E2E_PROJECT: framee2e_${{ github.run_id }}_${{ github.run_attempt }}
+      APP_SITE: http://127.0.0.1
+      STORAGE_SITE: http://storage.localhost
+      OBJECT_STORAGE_EXTERNAL_ENDPOINT: http://storage.localhost
+      POSTGRES_DB: production_fixture
+      POSTGRES_USER: production_fixture_user
+      POSTGRES_PASSWORD: production_fixture_password_32_chars
+      JOB_SOURCE_ENCRYPTION_KEY: JSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSU=
+      MINIO_ROOT_USER: production_fixture_access
+      MINIO_ROOT_PASSWORD: production_fixture_password_32_chars
+      MINIO_BUCKET: production-fixture
+      INTERNAL_PROXY_SHARED_SECRET: production_fixture_proxy_secret_32_chars
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - name: Validate development and production Compose
+        run: |
+          docker compose -f compose.yaml config --quiet
+          docker compose -f compose.production.yaml -f apps/frontend/tests/system/compose.production-e2e.yaml config --quiet
+      - name: Verify production example fails closed
+        run: |
+          if sh deploy/scripts/validate-env.sh .env.production.example; then
+            echo "Placeholder environment unexpectedly passed validation" >&2
+            exit 1
+          fi
+      - name: Verify environment and backup path contracts
+        run: sh deploy/scripts/production-contract-smoke.sh
+      - name: Verify isolated PostgreSQL and MinIO backup restore
+        env:
+          BACKUP_SMOKE_PROJECT: framebackupsmoke_${{ github.run_id }}_${{ github.run_attempt }}
+        run: sh deploy/scripts/backup-restore-smoke.sh
+      - working-directory: apps/frontend
+        run: npm ci
+      - working-directory: apps/frontend
+        run: npx playwright install --with-deps chromium
+      - name: Verify bounded streaming proxy behavior
+        working-directory: apps/frontend
+        run: |
+          npm test -- --run tests/unit/route-proxy.test.ts
+          npm run build
+          npm run test:proxy-integration
+      - name: Run frontend Playwright scenarios
+        working-directory: apps/frontend
+        run: npm run test:e2e
+      - name: Run isolated production smoke and persistence flow
+        working-directory: apps/frontend
+        run: npm run test:production-smoke
+      - name: Bounded redacted diagnostics
+        if: failure()
+        working-directory: apps/frontend
+        run: npm run test:production-smoke -- --diagnostics-only
+      - name: Remove only this run's resources
+        if: always()
+        working-directory: apps/frontend
+        run: npm run test:production-smoke -- --cleanup-only

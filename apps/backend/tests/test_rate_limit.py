@@ -1,5 +1,8 @@
 import asyncio
 import base64
+import hashlib
+import hmac
+import ipaddress
 import os
 import socket
 from types import SimpleNamespace
@@ -16,11 +19,20 @@ from app.security.rate_limit import (
     RateLimitDecision,
     RateLimitMiddleware,
     RedisRateLimiter,
+    _signed_proxy_client,
     client_identifier,
     derive_rate_limit_key,
 )
 
+PROXY_SIGNATURE_DOMAIN = b"frame-intelligence-platform:proxy-client-ip:v1"
+HMAC_VECTOR_SECRET = "fixture-only-proxy-secret-0123456789-DO-NOT-USE"
+HMAC_VECTOR_IP = "203.0.113.8"
+HMAC_VECTOR_EXPECTED = (
+    "d513dd72d0b92b859e2130ba7c5d6cd3b9ebf8ce894cb1aa0ddd9a8349d3f204"
+)
+
 TEST_SECRET = base64.urlsafe_b64encode(bytes(range(32))).decode()
+PROXY_SECRET = "proxy-secret-0123456789-ABCDEFGHIJ"
 
 
 def scope_for(host: str, forwarded: str | None = None) -> dict:
@@ -48,6 +60,82 @@ def identity(host: str, forwarded: str | None, networks: list[str]) -> str:
         trusted_proxy_cidrs=networks,
         secret=TEST_SECRET,
     )
+
+
+def signed_headers(address: str, *, signature: str | None = None) -> dict[str, str]:
+    canonical = str(ipaddress.ip_address(address))
+    valid = hmac.new(
+        PROXY_SECRET.encode(),
+        PROXY_SIGNATURE_DOMAIN + b"\0" + canonical.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "X-Forwarded-For": address,
+        "X-Frame-Client-IP-Signature": signature or valid,
+    }
+
+
+def signed_identity(host: str, address: str, *, signature: str | None = None) -> str:
+    headers = signed_headers(address, signature=signature)
+    scope = scope_with_headers(
+        host,
+        [(name.lower().encode(), value.encode()) for name, value in headers.items()],
+    )
+    return client_identifier(
+        scope,
+        trusted_proxy_cidrs=[],
+        secret=TEST_SECRET,
+        internal_proxy_shared_secret=PROXY_SECRET,
+    )
+
+
+def test_signed_proxy_clients_have_distinct_hashed_ipv4_and_ipv6_identities() -> None:
+    first = signed_identity("172.20.0.3", "203.0.113.8")
+    second = signed_identity("172.20.0.3", "203.0.113.9")
+    ipv6 = signed_identity("172.20.0.3", "2001:0db8:0:0:0:0:0:8")
+    assert len(first) == 64 and first != second and first != ipv6
+    assert all(
+        raw not in value
+        for raw in ("203.0.113.8", "203.0.113.9")
+        for value in (first, second, ipv6)
+    )
+
+
+def test_untrusted_data_peer_cannot_spoof_signed_proxy_identity() -> None:
+    direct = identity("172.21.0.8", None, [])
+    forged = signed_identity("172.21.0.8", "203.0.113.8", signature="0" * 64)
+    assert forged == direct
+
+
+def test_proxy_signature_requires_the_versioned_domain() -> None:
+    address = "203.0.113.8"
+    undomained = hmac.new(
+        PROXY_SECRET.encode(), address.encode(), hashlib.sha256
+    ).hexdigest()
+    direct = identity("172.20.0.3", None, [])
+    assert signed_identity("172.20.0.3", address, signature=undomained) == direct
+
+
+def test_proxy_signature_rejects_a_different_domain() -> None:
+    address = "203.0.113.8"
+    wrong_domain = hmac.new(
+        PROXY_SECRET.encode(),
+        b"frame-intelligence-platform:proxy-client-ip:v2\0" + address.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    direct = identity("172.20.0.3", None, [])
+    assert signed_identity("172.20.0.3", address, signature=wrong_domain) == direct
+
+
+def test_shared_hardcoded_proxy_client_ip_hmac_vector() -> None:
+    scope = scope_with_headers(
+        "172.20.0.3",
+        [
+            (b"x-forwarded-for", HMAC_VECTOR_IP.encode()),
+            (b"x-frame-client-ip-signature", HMAC_VECTOR_EXPECTED.encode()),
+        ],
+    )
+    assert _signed_proxy_client(scope, HMAC_VECTOR_SECRET) == HMAC_VECTOR_IP
 
 
 def test_untrusted_peer_ignores_forwarded_header() -> None:
@@ -130,6 +218,7 @@ def middleware_app(limiter) -> FastAPI:
     app.state.settings = SimpleNamespace(
         trusted_proxy_cidrs=[],
         job_source_encryption_key=TEST_SECRET,
+        internal_proxy_shared_secret=PROXY_SECRET,
         rate_limit_submission_requests=2,
         rate_limit_result_requests=10,
         rate_limit_window_seconds=60,
@@ -285,6 +374,8 @@ def test_full_middleware_stack_rejects_without_body_and_adds_headers(
         assert (
             headers[b"access-control-allow-origin"] == b"https://frontend.example.test"
         )
+        if expected_status == 429:
+            assert int(headers[b"retry-after"]) > 0
         assert not any(
             value in body.lower()
             for value in (b"192.0.2.8", b"redis", b"secret", b"internal")
@@ -390,3 +481,58 @@ def test_real_redis_drives_real_http_429_and_real_outage_503() -> None:
         value in response.text.lower()
         for value in ("redis", "127.0.0.1", str(unavailable_port), "secret")
     )
+
+
+@pytest.mark.skipif(
+    os.getenv("REDIS_INTEGRATION") != "1", reason="requires isolated Redis"
+)
+def test_real_http_and_redis_keep_signed_client_quotas_separate() -> None:
+    redis = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/15"))
+    app = middleware_app(RedisRateLimiter(redis, namespace="fip:test:clients"))
+    app.state.settings.rate_limit_submission_requests = 1
+    with TestClient(app, client=("172.20.0.3", 50000)) as client:
+        first_a = client.post(
+            "/api/v1/jobs/upload", headers=signed_headers("203.0.113.8")
+        )
+        second_a = client.post(
+            "/api/v1/jobs/upload", headers=signed_headers("203.0.113.8")
+        )
+        first_b = client.post(
+            "/api/v1/jobs/upload", headers=signed_headers("2001:db8::9")
+        )
+        forged = client.post(
+            "/api/v1/jobs/upload",
+            headers=signed_headers("198.51.100.4", signature="0" * 64),
+        )
+        keys = client.portal.call(redis.keys, "fip:test:clients:*")
+        assert first_a.status_code == 200
+        assert second_a.status_code == 429 and int(second_a.headers["Retry-After"]) > 0
+        assert first_b.status_code == 200
+        assert forged.status_code == 200
+        client.portal.call(redis.aclose)
+    data_redis = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/15"))
+    data_app = middleware_app(
+        RedisRateLimiter(data_redis, namespace="fip:test:clients")
+    )
+    data_app.state.settings.rate_limit_submission_requests = 1
+    with TestClient(data_app, client=("172.21.0.8", 50000)) as data_peer:
+        unsigned = data_peer.post(
+            "/api/v1/jobs/upload", headers={"X-Forwarded-For": "192.0.2.9"}
+        )
+        keys = data_peer.portal.call(data_redis.keys, "fip:test:clients:*")
+        assert unsigned.status_code == 200
+        assert len(keys) == 4
+        assert all(
+            not any(
+                raw in key
+                for raw in (
+                    b"203.0.113.8",
+                    b"2001:db8",
+                    b"198.51.100.4",
+                    b"192.0.2.9",
+                )
+            )
+            for key in keys
+        )
+        data_peer.portal.call(data_redis.delete, *keys)
+        data_peer.portal.call(data_redis.aclose)

@@ -1,5 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
+import { createHmac } from "node:crypto";
+import { isIP } from "node:net";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +14,26 @@ const RESPONSE_HEADERS = [
   "content-disposition",
   "retry-after",
 ] as const;
-const UPSTREAM_TIMEOUT_MS = 30_000;
+const API_TIMEOUT_DEFAULT_SECONDS = 30;
+const UPLOAD_TIMEOUT_DEFAULT_SECONDS = 1_800;
+const CLIENT_IP_SIGNATURE_HEADER = "x-frame-client-ip-signature";
+const CLIENT_IP_SIGNATURE_DOMAIN = "frame-intelligence-platform:proxy-client-ip:v1";
+
+function boundedTimeout(name: string, fallback: number, minimum: number, maximum: number): number {
+  const raw = process.env[name];
+  const seconds = raw === undefined ? fallback : Number(raw);
+  if (!Number.isSafeInteger(seconds) || seconds < minimum || seconds > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return seconds * 1_000;
+}
+
+function upstreamTimeout(path: string[], method: string): number {
+  const upload = method === "POST" && path.length === 2 && path[0] === "jobs" && path[1] === "upload";
+  return upload
+    ? boundedTimeout("UPLOAD_PROXY_TIMEOUT_SECONDS", UPLOAD_TIMEOUT_DEFAULT_SECONDS, 60, 7_200)
+    : boundedTimeout("API_PROXY_TIMEOUT_SECONDS", API_TIMEOUT_DEFAULT_SECONDS, 1, 300);
+}
 
 type StreamingRequestInit = RequestInit & { duplex?: "half" };
 
@@ -54,6 +75,15 @@ function safeSegments(segments: string[]): boolean {
   });
 }
 
+function canonicalClientIp(request: NextRequest): string | null {
+  const value = request.headers.get("x-forwarded-for");
+  if (!value || value.length > 45 || value.includes(",") || /[\x00-\x20\x7f]/.test(value)) return null;
+  const version = isIP(value);
+  if (version === 4) return value;
+  if (version === 6) return new URL(`http://[${value}]/`).hostname.slice(1, -1).toLowerCase();
+  return null;
+}
+
 function requestHeaders(request: NextRequest): Headers {
   const headers = new Headers();
   for (const name of REQUEST_HEADERS) {
@@ -65,6 +95,19 @@ function requestHeaders(request: NextRequest): Headers {
     } else {
       headers.set(name, value);
     }
+  }
+  const clientIp = canonicalClientIp(request);
+  const proxySecret = process.env.INTERNAL_PROXY_SHARED_SECRET;
+  if (clientIp && proxySecret && proxySecret.length >= 32) {
+    headers.set("x-forwarded-for", clientIp);
+    headers.set(
+      CLIENT_IP_SIGNATURE_HEADER,
+      createHmac("sha256", proxySecret)
+        .update(CLIENT_IP_SIGNATURE_DOMAIN)
+        .update("\0")
+        .update(clientIp)
+        .digest("hex"),
+    );
   }
   return headers;
 }
@@ -139,7 +182,13 @@ async function forward(request: NextRequest, context: { params: Promise<{ path: 
   const abortUpstream = () => controller.abort(request.signal.reason);
   if (request.signal.aborted) abortUpstream();
   else request.signal.addEventListener("abort", abortUpstream, { once: true });
-  const timeout = setTimeout(() => controller.abort(new DOMException("Timed out", "TimeoutError")), UPSTREAM_TIMEOUT_MS);
+  let timeoutMs: number;
+  try {
+    timeoutMs = upstreamTimeout(path, request.method);
+  } catch {
+    return NextResponse.json({ detail: "Proxy timeout configuration is invalid" }, { status: 503 });
+  }
+  const timeout = setTimeout(() => controller.abort(new DOMException("Timed out", "TimeoutError")), timeoutMs);
   const cleanup = () => {
     clearTimeout(timeout);
     request.signal.removeEventListener("abort", abortUpstream);

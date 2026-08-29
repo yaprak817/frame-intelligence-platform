@@ -1,0 +1,203 @@
+name: frame-intelligence-production
+
+x-backend-environment: &backend-environment
+  ENVIRONMENT: production
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?required}:${POSTGRES_PASSWORD:?required}@postgres:5432/${POSTGRES_DB:?required}
+  JOB_SOURCE_ENCRYPTION_KEY: ${JOB_SOURCE_ENCRYPTION_KEY:?required}
+  CELERY_BROKER_URL: redis://redis:6379/0
+  REDIS_URL: redis://redis:6379/0
+  CORS_ALLOW_ORIGINS: '[]'
+  CORS_ALLOW_CREDENTIALS: "false"
+  # Next.js deliberately strips inbound forwarding headers, so no Docker peer is trusted.
+  TRUSTED_PROXY_CIDRS: '[]'
+  INTERNAL_PROXY_SHARED_SECRET: ${INTERNAL_PROXY_SHARED_SECRET:?required}
+  RATE_LIMIT_SUBMISSION_REQUESTS: ${RATE_LIMIT_SUBMISSION_REQUESTS:-10}
+  RATE_LIMIT_RESULT_REQUESTS: ${RATE_LIMIT_RESULT_REQUESTS:-60}
+  RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+  DEPENDENCY_TIMEOUT_SECONDS: ${DEPENDENCY_TIMEOUT_SECONDS:-3}
+  OBJECT_STORAGE_ENDPOINT: http://minio:9000
+  OBJECT_STORAGE_EXTERNAL_ENDPOINT: ${OBJECT_STORAGE_EXTERNAL_ENDPOINT:?required}
+  OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:?required}
+  OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?required}
+  OBJECT_STORAGE_BUCKET: ${MINIO_BUCKET:?required}
+  OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+  OBJECT_STORAGE_ADDRESSING_STYLE: path
+  OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS:-1}
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-10}
+  OUTBOX_BACKOFF_BASE_SECONDS: ${OUTBOX_BACKOFF_BASE_SECONDS:-1}
+  OUTBOX_BACKOFF_MAX_SECONDS: ${OUTBOX_BACKOFF_MAX_SECONDS:-60}
+  MIGRATION_LOCK_TIMEOUT_SECONDS: ${MIGRATION_LOCK_TIMEOUT_SECONDS:-60}
+
+services:
+  proxy:
+    image: caddy:2.10.2-alpine
+    environment:
+      APP_SITE: ${APP_SITE:?required}
+      STORAGE_SITE: ${STORAGE_SITE:?required}
+    ports:
+      - "${PROXY_HTTP_BIND:-80}:80"
+      - "${PROXY_HTTPS_BIND:-443}:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [frontend-edge, storage-edge]
+    depends_on:
+      frontend: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  frontend:
+    build: {context: ./apps/frontend}
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+      API_PROXY_TIMEOUT_SECONDS: ${API_PROXY_TIMEOUT_SECONDS:-30}
+      UPLOAD_PROXY_TIMEOUT_SECONDS: ${UPLOAD_PROXY_TIMEOUT_SECONDS:-1800}
+      INTERNAL_PROXY_SHARED_SECRET: ${INTERNAL_PROXY_SHARED_SECRET:?required}
+    expose: ["3000"]
+    networks: [frontend-edge, application]
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "/app/healthcheck.mjs"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build: {context: ./apps/backend}
+    command: ["python", "-m", "app.db.migrate"]
+    environment: *backend-environment
+    networks: [data]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  backend:
+    build: {context: ./apps/backend}
+    environment: *backend-environment
+    command: ["/bin/sh", "-ec", "exec uvicorn app.main:app --host \"$(getent hosts backend-http | awk '{print $1; exit}')\" --port 8000"]
+    expose: ["8000"]
+    networks:
+      application: {aliases: [backend-http]}
+      data:
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://backend-http:8000/api/v1/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  outbox-publisher:
+    build: {context: ./apps/backend}
+    command: ["python", "-m", "app.outbox.publisher"]
+    environment: *backend-environment
+    networks: [data]
+    depends_on:
+      backend: {condition: service_healthy}
+    restart: unless-stopped
+
+  frame-worker:
+    build: {context: ./services/frame-worker}
+    command: ["celery", "--quiet", "-A", "frame_worker.orchestration.celery_app:celery_app", "worker", "--loglevel=WARNING", "--queues=video-processing"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?required}:${POSTGRES_PASSWORD:?required}@postgres:5432/${POSTGRES_DB:?required}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      JOB_SOURCE_ENCRYPTION_KEY: ${JOB_SOURCE_ENCRYPTION_KEY:?required}
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:?required}
+      OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?required}
+      OBJECT_STORAGE_BUCKET: ${MINIO_BUCKET:?required}
+      OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+      OBJECT_STORAGE_ADDRESSING_STYLE: path
+      MAX_DOWNLOAD_BYTES: ${MAX_DOWNLOAD_BYTES:-2147483648}
+      JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-900}
+      JOB_HEARTBEAT_INTERVAL_SECONDS: ${JOB_HEARTBEAT_INTERVAL_SECONDS:-60}
+      CELERY_VISIBILITY_TIMEOUT_SECONDS: ${CELERY_VISIBILITY_TIMEOUT_SECONDS:-7200}
+      CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
+    networks: [data]
+    depends_on:
+      backend: {condition: service_healthy}
+    tmpfs: [/tmp/frame-intelligence:mode=1777]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?required}
+    volumes: [minio_data:/data]
+    networks: [storage-edge, data]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?required}
+      MINIO_BUCKET: ${MINIO_BUCKET:?required}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" >/dev/null
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}" >/dev/null
+        mc anonymous set none "local/$${MINIO_BUCKET}" >/dev/null
+    networks: [data]
+    depends_on:
+      minio: {condition: service_healthy}
+    restart: "no"
+
+networks:
+  frontend-edge:
+  storage-edge:
+  application: {internal: true}
+  data: {internal: true}
+
+volumes:
+  postgres_data:
+  minio_data:
+  caddy_data:
+  caddy_config:

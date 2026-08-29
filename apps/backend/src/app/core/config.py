@@ -1,6 +1,7 @@
 import base64
 import binascii
 import ipaddress
+import re
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -11,12 +12,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 def decode_encryption_key(value: str) -> bytes:
     """Decode and validate a URL-safe base64 AES-256 key."""
 
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43}=", value):
+        raise ValueError(
+            "JOB_SOURCE_ENCRYPTION_KEY must be canonical padded URL-safe base64"
+        )
     try:
         decoded = base64.b64decode(value, altchars=b"-_", validate=True)
     except (binascii.Error, ValueError) as error:
         raise ValueError("JOB_SOURCE_ENCRYPTION_KEY must be URL-safe base64") from error
     if len(decoded) != 32:
         raise ValueError("JOB_SOURCE_ENCRYPTION_KEY must decode to exactly 32 bytes")
+    if base64.urlsafe_b64encode(decoded).decode() != value:
+        raise ValueError(
+            "JOB_SOURCE_ENCRYPTION_KEY must be canonical padded URL-safe base64"
+        )
     return decoded
 
 
@@ -43,6 +52,7 @@ class Settings(BaseSettings):
     cors_allow_origins: list[str] = Field(default_factory=list)
     cors_allow_credentials: bool = False
     trusted_proxy_cidrs: list[str] = Field(default_factory=list)
+    internal_proxy_shared_secret: str = ""
     rate_limit_submission_requests: int = 10
     rate_limit_result_requests: int = 60
     rate_limit_window_seconds: int = 60
@@ -106,13 +116,19 @@ class Settings(BaseSettings):
                 not endpoint.hostname
                 or endpoint.username is not None
                 or endpoint.password is not None
+                or endpoint.path not in {"", "/"}
                 or endpoint.query
                 or endpoint.fragment
             ):
                 raise ValueError("Object storage endpoint is invalid")
-        if self.environment in {"staging", "production"} and scheme != "https":
+        if (
+            self.environment in {"staging", "production"}
+            and scheme != "https"
+            and self.object_storage_endpoint != "http://minio:9000"
+        ):
             raise ValueError(
-                "OBJECT_STORAGE_ENDPOINT must use https outside development"
+                "OBJECT_STORAGE_ENDPOINT must use https unless it targets a private "
+                "container service hostname"
             )
         if self.environment in {"staging", "production"} and external_scheme != "https":
             raise ValueError(
@@ -181,10 +197,16 @@ class Settings(BaseSettings):
             "DATABASE_URL": _url_password(self.database_url),
             "OBJECT_STORAGE_ACCESS_KEY": self.object_storage_access_key,
             "OBJECT_STORAGE_SECRET_KEY": self.object_storage_secret_key,
+            "INTERNAL_PROXY_SHARED_SECRET": self.internal_proxy_shared_secret,
         }
         for name, value in credentials.items():
             normalized = (value or "").strip().lower()
-            if not normalized or normalized in placeholders or "replace" in normalized:
+            if (
+                not normalized
+                or normalized in placeholders
+                or "replace" in normalized
+                or (name == "INTERNAL_PROXY_SHARED_SECRET" and len(value or "") < 32)
+            ):
                 raise ValueError(f"{name} must be configured securely in production")
         key = decode_encryption_key(self.job_source_encryption_key)
         if len(set(key)) < 8:

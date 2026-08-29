@@ -220,6 +220,11 @@ __marimo__/
 .env
 .env.*
 !.env.example
+!.env.production.example
+
+# Operational output must remain outside version control.
+backups/
+*.dump
 
 # Python
 __pycache__/

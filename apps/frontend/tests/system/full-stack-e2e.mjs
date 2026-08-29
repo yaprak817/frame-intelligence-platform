@@ -8,10 +8,10 @@ import { spawn } from "node:child_process";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../../../..");
-const COMPOSE_FILES = [
-  "-f", join(REPOSITORY_ROOT, "compose.yaml"),
-  "-f", join(SCRIPT_DIR, "compose.e2e.yaml"),
-];
+const PRODUCTION_E2E = process.env.PRODUCTION_E2E === "1";
+const COMPOSE_FILES = PRODUCTION_E2E
+  ? ["-f", join(REPOSITORY_ROOT, "compose.production.yaml"), "-f", join(SCRIPT_DIR, "compose.production-e2e.yaml")]
+  : ["-f", join(REPOSITORY_ROOT, "compose.yaml"), "-f", join(SCRIPT_DIR, "compose.e2e.yaml")];
 const RUN_TIMEOUT_MS = 15 * 60_000;
 const READY_TIMEOUT_MS = 10 * 60_000;
 const JOB_TIMEOUT_MS = 4 * 60_000;
@@ -267,9 +267,42 @@ async function browserFlow(baseUrl, videoPath) {
     const manifest = JSON.parse(await readFile(downloadPath, "utf8"));
     if (!manifestIsPublic(manifest, jobId)) throw new Error("İndirilen public manifest doğrulanamadı.");
     if (!download.suggestedFilename().includes(jobId)) throw new Error("Manifest dosya adı job ilişkisini korumuyor.");
-    return { statuses: statuses.join(" -> "), framesSaved };
+    return { statuses: statuses.join(" -> "), framesSaved, jobId };
   } finally {
     await context.close();
+    await browser.close();
+  }
+}
+
+async function waitForService(project, env, service, expected = "healthy", timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const container = await docker(project, env, ["ps", "-q", service], { timeoutMs: 30_000, allowFailure: true });
+    if (container.stdout) {
+      const state = await run("docker", ["inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", container.stdout], { timeoutMs: 30_000, allowFailure: true });
+      if (state.stdout === expected) return;
+      if (["exited", "dead"].includes(state.stdout)) throw new Error(`${service} kontrollü restart sırasında durdu.`);
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+  throw new Error(`${service} kontrollü restart sonrasında hazır olmadı.`);
+}
+
+async function verifyPersistedResultPage(baseUrl, jobId) {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/jobs/${jobId}/result`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await page.locator("#summary-title").waitFor({ state: "visible", timeout: 30_000 });
+    const image = page.locator(".frame-card img").first();
+    await image.waitFor({ state: "visible", timeout: 30_000 });
+    await image.evaluate((node) => new Promise((resolveImage, rejectImage) => {
+      if (node.complete && node.naturalWidth > 0) return resolveImage();
+      node.addEventListener("load", () => resolveImage(), { once: true });
+      node.addEventListener("error", () => rejectImage(new Error("Kalıcı frame görseli yüklenemedi.")), { once: true });
+    }));
+  } finally {
+    await page.close();
     await browser.close();
   }
 }
@@ -297,8 +330,13 @@ async function main() {
     OBJECT_STORAGE_BUCKET: `e2e-${project.slice(-24).replaceAll("_", "-")}`,
     MINIO_ROOT_USER: "e2e_fixture_access",
     MINIO_ROOT_PASSWORD: fakePassword,
+    INTERNAL_PROXY_SHARED_SECRET: `proxy_${project}_0123456789abcdef`,
     MINIO_BUCKET: `e2e-${project.slice(-24).replaceAll("_", "-")}`,
     OBJECT_STORAGE_EXTERNAL_ENDPOINT: `http://${publicHost}:${minioPort}`,
+    APP_SITE: "http://127.0.0.1",
+    STORAGE_SITE: "http://storage.localhost",
+    PROXY_HTTP_BIND: `127.0.0.1:${frontendPort}`,
+    PROXY_HTTPS_BIND: `127.0.0.1:${minioPort}`,
   };
   if (mode === "--cleanup-only") return cleanup(project, env, null, null);
   if (mode === "--diagnostics-only") return diagnostics(project, env);
@@ -322,14 +360,64 @@ async function main() {
     await run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 30_000 });
     await docker(project, env, ["config", "--quiet"], { timeoutMs: 30_000 });
     await docker(project, env, ["up", "-d", "--build", "--wait", "--wait-timeout", String(Math.ceil(READY_TIMEOUT_MS / 1000))], { timeoutMs: READY_TIMEOUT_MS });
-    const resources = await projectResources(project);
-    if (resources.length < 10) throw new Error("İzole Compose kaynakları beklenen kapsamda oluşmadı.");
+    const expectedServices = ["proxy", "frontend", "migrate", "backend", "outbox-publisher", "frame-worker", "postgres", "redis", "minio", "minio-init"];
+    for (const service of expectedServices) {
+      const container = await docker(project, env, ["ps", "-a", "-q", service], { timeoutMs: 30_000 });
+      if (!/^[0-9a-f]{12,64}$/.test(container.stdout)) throw new Error(`Beklenen production servisi bulunamadı: ${service}`);
+    }
+    const migrateContainer = (await docker(project, env, ["ps", "-a", "-q", "migrate"], { timeoutMs: 30_000 })).stdout;
+    const migrationExit = await run("docker", ["inspect", "--format", "{{.State.ExitCode}}", migrateContainer], { timeoutMs: 30_000 });
+    if (migrationExit.stdout !== "0") throw new Error(`Migration exit code 0 değil: ${migrationExit.stdout}`);
+    const readiness = await fetch(`http://${publicHost}:${frontendPort}/api/v1/ready`);
+    if (!readiness.ok || JSON.stringify(await readiness.json()) !== '{"status":"ready"}') throw new Error("Reverse proxy readiness tam ready cevabı üretmedi.");
     const worker = await docker(project, env, ["ps", "-q", "frame-worker"], { timeoutMs: 30_000 });
     if (!/^[0-9a-f]{12,64}$/.test(worker.stdout)) throw new Error("Doğrulanmış worker container bulunamadı.");
     await docker(project, env, ["exec", "-T", "frame-worker", "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=12:duration=4", "-vf", "eq=brightness=0.10:saturation=1.15", "-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-y", "/tmp/e2e-fixture.mp4"], { timeoutMs: 60_000 });
     await run("docker", ["cp", `${worker.stdout}:/tmp/e2e-fixture.mp4`, videoPath], { timeoutMs: 30_000 });
     const result = await browserFlow(`http://${publicHost}:${frontendPort}`, videoPath);
-    console.log(`Full-stack E2E başarılı: ${result.statuses}; kare=${result.framesSaved}; süre=${((Date.now() - started) / 1000).toFixed(1)} sn.`);
+    if (result.framesSaved !== 4) throw new Error(`Deterministik fixture tam 4 frame üretmedi: ${result.framesSaved}`);
+    if (PRODUCTION_E2E) {
+      const postgresBefore = (await docker(project, env, ["ps", "-q", "postgres"], { timeoutMs: 30_000 })).stdout;
+      const minioBefore = (await docker(project, env, ["ps", "-q", "minio"], { timeoutMs: 30_000 })).stdout;
+      const restartServices = ["redis", "backend", "outbox-publisher", "frame-worker", "frontend", "proxy"];
+      await docker(project, env, ["stop", "--timeout", "10", ...restartServices], { timeoutMs: 120_000 });
+      await docker(project, env, ["up", "-d", "--force-recreate", "--no-deps", "postgres", "minio"], { timeoutMs: 120_000 });
+      await waitForService(project, env, "postgres");
+      await waitForService(project, env, "minio");
+      await docker(project, env, ["run", "--rm", "minio-init"], { timeoutMs: 60_000 });
+      await docker(project, env, ["start", "redis"], { timeoutMs: 30_000 });
+      await waitForService(project, env, "redis");
+      await docker(project, env, ["start", "backend"], { timeoutMs: 30_000 });
+      await waitForService(project, env, "backend");
+      await docker(project, env, ["start", "outbox-publisher", "frame-worker", "frontend"], { timeoutMs: 60_000 });
+      await waitForService(project, env, "outbox-publisher", "running");
+      await waitForService(project, env, "frame-worker", "running");
+      await waitForService(project, env, "frontend");
+      await docker(project, env, ["start", "proxy"], { timeoutMs: 30_000 });
+      await waitForService(project, env, "proxy");
+      const postgresAfter = (await docker(project, env, ["ps", "-q", "postgres"], { timeoutMs: 30_000 })).stdout;
+      const minioAfter = (await docker(project, env, ["ps", "-q", "minio"], { timeoutMs: 30_000 })).stdout;
+      if (!postgresBefore || postgresAfter === postgresBefore || !minioBefore || minioAfter === minioBefore) {
+        throw new Error("PostgreSQL veya MinIO kalıcılık testinde yeniden oluşturulmadı.");
+      }
+      const persisted = await fetch(`http://${publicHost}:${frontendPort}/api/v1/jobs/${result.jobId}`);
+      const persistedBody = await persisted.json();
+      if (!persisted.ok || persistedBody?.status !== "SUCCEEDED") {
+        throw new Error("PostgreSQL kalıcılığı kontrollü restart sonrasında doğrulanamadı.");
+      }
+      const resultResponse = await fetch(`http://${publicHost}:${frontendPort}/api/v1/jobs/${result.jobId}/result`);
+      const resultBody = await resultResponse.json();
+      if (!resultResponse.ok || !Array.isArray(resultBody?.frames) || resultBody.frames.length < 1) {
+        throw new Error("MinIO kalıcılığı kontrollü restart sonrasında doğrulanamadı.");
+      }
+      await verifyPersistedResultPage(`http://${publicHost}:${frontendPort}`, result.jobId);
+      const manifestResponse = await fetch(`http://${publicHost}:${frontendPort}/api/v1/jobs/${result.jobId}/result/manifest`);
+      const manifest = await manifestResponse.json();
+      if (!manifestResponse.ok || !manifestIsPublic(manifest, result.jobId)) {
+        throw new Error("Restart sonrası kalıcı manifest doğrulanamadı.");
+      }
+    }
+    console.log(`Full-stack E2E başarılı: durumlar=${result.statuses}; kare=${result.framesSaved}; container_recreation=${PRODUCTION_E2E ? "postgres,minio" : "none"}; süre=${((Date.now() - started) / 1000).toFixed(1)} sn.`);
   } catch (error) {
     await diagnostics(project, env);
     throw error;
