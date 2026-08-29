@@ -42,7 +42,9 @@ def main() -> int:
                 raise SystemExit("Timed out waiting for the production migration lock")
             time.sleep(1)
         try:
-            return subprocess.run(["alembic", "upgrade", "head"], check=False).returncode
+            return subprocess.run(
+                ["alembic", "upgrade", "head"], check=False
+            ).returncode
         finally:
             connection.execute("SELECT pg_advisory_unlock(%s)", (LOCK_ID,))
 
