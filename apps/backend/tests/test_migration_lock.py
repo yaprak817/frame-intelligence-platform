@@ -19,8 +19,9 @@ def test_migration_runner_holds_lock_until_alembic_finishes(monkeypatch) -> None
         patch.object(
             migrate.subprocess,
             "run",
-            side_effect=lambda *_args, **_kwargs: events.append("alembic")
-            or MagicMock(returncode=0),
+            side_effect=lambda *_args, **_kwargs: (
+                events.append("alembic") or MagicMock(returncode=0)
+            ),
         ),
     ):
         assert migrate.main() == 0
