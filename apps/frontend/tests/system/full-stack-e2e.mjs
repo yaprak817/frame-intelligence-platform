@@ -360,7 +360,9 @@ async function main() {
     await run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 30_000 });
     await docker(project, env, ["config", "--quiet"], { timeoutMs: 30_000 });
     await docker(project, env, ["up", "-d", "--build", "--wait", "--wait-timeout", String(Math.ceil(READY_TIMEOUT_MS / 1000))], { timeoutMs: READY_TIMEOUT_MS });
-    const expectedServices = ["proxy", "frontend", "migrate", "backend", "outbox-publisher", "frame-worker", "postgres", "redis", "minio", "minio-init"];
+    const expectedServices = PRODUCTION_E2E
+      ? ["proxy", "frontend", "migrate", "backend", "outbox-publisher", "frame-worker", "postgres", "redis", "minio", "minio-init"]
+      : ["frontend", "backend", "outbox-publisher", "frame-worker", "postgres", "redis", "minio", "minio-init"];
     for (const service of expectedServices) {
       const container = await docker(project, env, ["ps", "-a", "-q", service], { timeoutMs: 30_000 });
       if (!/^[0-9a-f]{12,64}$/.test(container.stdout)) throw new Error(`Beklenen production servisi bulunamadı: ${service}`);
