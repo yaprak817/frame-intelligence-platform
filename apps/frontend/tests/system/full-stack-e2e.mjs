@@ -367,9 +367,11 @@ async function main() {
       const container = await docker(project, env, ["ps", "-a", "-q", service], { timeoutMs: 30_000 });
       if (!/^[0-9a-f]{12,64}$/.test(container.stdout)) throw new Error(`Beklenen production servisi bulunamadı: ${service}`);
     }
-    const migrateContainer = (await docker(project, env, ["ps", "-a", "-q", "migrate"], { timeoutMs: 30_000 })).stdout;
-    const migrationExit = await run("docker", ["inspect", "--format", "{{.State.ExitCode}}", migrateContainer], { timeoutMs: 30_000 });
-    if (migrationExit.stdout !== "0") throw new Error(`Migration exit code 0 değil: ${migrationExit.stdout}`);
+    if (PRODUCTION_E2E) {
+      const migrateContainer = (await docker(project, env, ["ps", "-a", "-q", "migrate"], { timeoutMs: 30_000 })).stdout;
+      const migrationExit = await run("docker", ["inspect", "--format", "{{.State.ExitCode}}", migrateContainer], { timeoutMs: 30_000 });
+      if (migrationExit.stdout !== "0") throw new Error(`Migration exit code 0 değil: ${migrationExit.stdout}`);
+    }
     const readiness = await fetch(`http://${publicHost}:${frontendPort}/api/v1/ready`);
     if (!readiness.ok || JSON.stringify(await readiness.json()) !== '{"status":"ready"}') throw new Error("Reverse proxy readiness tam ready cevabı üretmedi.");
     const worker = await docker(project, env, ["ps", "-q", "frame-worker"], { timeoutMs: 30_000 });
