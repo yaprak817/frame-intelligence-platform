@@ -13,6 +13,7 @@ def secure_values() -> dict[str, object]:
         "job_source_encryption_key": base64.urlsafe_b64encode(
             bytes(range(32))
         ).decode(),
+        "internal_proxy_shared_secret": "proxy-secret-0123456789-ABCDEFGHIJ",
         "object_storage_endpoint": "https://storage.internal",
         "object_storage_external_endpoint": "https://storage.example.test",
         "object_storage_access_key": "prod-access-92",
@@ -25,6 +26,23 @@ def test_development_accepts_safe_test_key() -> None:
         job_source_encryption_key=base64.urlsafe_b64encode(b"T" * 32).decode()
     )
     assert settings.environment == "development"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("="),
+        base64.urlsafe_b64encode(bytes(range(32))).decode() + "=",
+        base64.b64encode(b"\xff" * 32).decode(),
+        base64.urlsafe_b64encode(bytes(range(32))).decode()[:-2] + "9=",
+        base64.urlsafe_b64encode(b"short").decode(),
+        base64.urlsafe_b64encode(b"x" * 33).decode(),
+        "!" * 43 + "=",
+    ],
+)
+def test_encryption_key_requires_canonical_padded_urlsafe_base64(value: str) -> None:
+    with pytest.raises(ValidationError, match="JOB_SOURCE_ENCRYPTION_KEY"):
+        Settings(job_source_encryption_key=value)
 
 
 def test_secure_production_config_is_accepted() -> None:
@@ -145,3 +163,41 @@ def test_invalid_cors_origins_are_rejected(origin) -> None:
             job_source_encryption_key=base64.urlsafe_b64encode(b"T" * 32).decode(),
             cors_allow_origins=[origin],
         )
+
+
+def test_production_allows_private_container_storage_endpoint() -> None:
+    values = secure_values()
+    values["object_storage_endpoint"] = "http://minio:9000"
+
+    settings = Settings(**values)
+
+    assert settings.object_storage_endpoint == "http://minio:9000"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://storage:9000",
+        "http://localhost:9000",
+        "http://127.0.0.1:9000",
+        "http://minio.example:9000",
+        "http://minio",
+        "http://minio:9001",
+        "http://minio:9000/path",
+        "http://minio:9000/",
+    ],
+)
+def test_production_rejects_other_cleartext_storage_hosts(endpoint: str) -> None:
+    values = secure_values()
+    values["object_storage_endpoint"] = endpoint
+
+    with pytest.raises(ValueError):
+        Settings(**values)
+
+
+@pytest.mark.parametrize("secret", ["", "short", "replace_with_random_value"])
+def test_production_rejects_invalid_internal_proxy_secret(secret: str) -> None:
+    values = secure_values()
+    values["internal_proxy_shared_secret"] = secret
+    with pytest.raises(ValidationError, match="INTERNAL_PROXY_SHARED_SECRET"):
+        Settings(**values)

@@ -1,0 +1,45 @@
+{
+	admin off
+	log default {
+		output discard
+	}
+}
+
+{$APP_SITE} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+	@video_upload path /api/v1/jobs/upload
+	handle @video_upload {
+		reverse_proxy frontend:3000 {
+			header_up X-Forwarded-For {remote_host}
+			transport http {
+				response_header_timeout 7230s
+			}
+		}
+	}
+	handle {
+		reverse_proxy frontend:3000 {
+			header_up X-Forwarded-For {remote_host}
+			transport http {
+				response_header_timeout 330s
+			}
+		}
+	}
+}
+
+{$STORAGE_SITE} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	reverse_proxy minio:9000
+}

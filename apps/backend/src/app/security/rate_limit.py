@@ -13,6 +13,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 RATE_LIMIT_DOMAIN = b"frame-intelligence-platform:rate-limit:v1"
 MAX_FORWARDED_HEADER_LENGTH = 512
 MAX_FORWARDED_HOPS = 16
+PROXY_SIGNATURE_HEADER = "x-frame-client-ip-signature"
+PROXY_SIGNATURE_DOMAIN = b"frame-intelligence-platform:proxy-client-ip:v1"
 
 
 class RedisCommands(Protocol):
@@ -68,7 +70,11 @@ def derive_rate_limit_key(encoded_secret: str) -> bytes:
 
 
 def client_identifier(
-    scope: Scope, *, trusted_proxy_cidrs: list[str], secret: str
+    scope: Scope,
+    *,
+    trusted_proxy_cidrs: list[str],
+    secret: str,
+    internal_proxy_shared_secret: str = "",
 ) -> str:
     direct = str(scope.get("client", ("unknown", 0))[0])
     try:
@@ -80,7 +86,10 @@ def client_identifier(
             ipaddress.ip_network(value, strict=False) for value in trusted_proxy_cidrs
         ]
         address = str(peer)
-        if any(peer in network for network in networks):
+        signed = _signed_proxy_client(scope, internal_proxy_shared_secret)
+        if signed is not None:
+            address = signed
+        elif any(peer in network for network in networks):
             forwarded_values = Headers(scope=scope).getlist("x-forwarded-for")
             forwarded = forwarded_values[0] if len(forwarded_values) == 1 else None
             candidate = _forwarded_client(forwarded, networks)
@@ -88,6 +97,35 @@ def client_identifier(
                 address = candidate
     derived_key = derive_rate_limit_key(secret)
     return hmac.new(derived_key, address.encode(), hashlib.sha256).hexdigest()
+
+
+def _signed_proxy_client(scope: Scope, shared_secret: str) -> str | None:
+    if len(shared_secret) < 32:
+        return None
+    headers = Headers(scope=scope)
+    forwarded_values = headers.getlist("x-forwarded-for")
+    signature_values = headers.getlist(PROXY_SIGNATURE_HEADER)
+    if len(forwarded_values) != 1 or len(signature_values) != 1:
+        return None
+    value = forwarded_values[0]
+    signature = signature_values[0]
+    if (
+        not value
+        or len(value) > 45
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or not re.fullmatch(r"[0-9a-f]{64}", signature)
+    ):
+        return None
+    try:
+        canonical = str(ipaddress.ip_address(value))
+    except ValueError:
+        return None
+    expected = hmac.new(
+        shared_secret.encode(),
+        PROXY_SIGNATURE_DOMAIN + b"\0" + canonical.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return canonical if hmac.compare_digest(signature, expected) else None
 
 
 def _forwarded_client(
@@ -155,6 +193,9 @@ class RateLimitMiddleware:
             scope,
             trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
             secret=settings.job_source_encryption_key,
+            internal_proxy_shared_secret=getattr(
+                settings, "internal_proxy_shared_secret", ""
+            ),
         )
         try:
             decision = await limiter.check(

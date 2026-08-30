@@ -1,0 +1,41 @@
+services:
+  proxy:
+    ports: !override
+      - "127.0.0.1:${FULL_STACK_E2E_FRONTEND_PORT}:80"
+    restart: "no"
+
+  frontend:
+    restart: "no"
+
+  migrate:
+    environment:
+      ENVIRONMENT: development
+      OBJECT_STORAGE_EXTERNAL_ENDPOINT: http://storage.localhost:${FULL_STACK_E2E_FRONTEND_PORT}
+    restart: "no"
+
+  backend:
+    environment:
+      ENVIRONMENT: development
+      OBJECT_STORAGE_EXTERNAL_ENDPOINT: http://storage.localhost:${FULL_STACK_E2E_FRONTEND_PORT}
+    restart: "no"
+
+  outbox-publisher:
+    environment:
+      ENVIRONMENT: development
+      OBJECT_STORAGE_EXTERNAL_ENDPOINT: http://storage.localhost:${FULL_STACK_E2E_FRONTEND_PORT}
+    restart: "no"
+
+  frame-worker:
+    restart: "no"
+
+  postgres:
+    restart: "no"
+
+  redis:
+    restart: "no"
+
+  minio:
+    restart: "no"
+
+  minio-init:
+    restart: "no"
