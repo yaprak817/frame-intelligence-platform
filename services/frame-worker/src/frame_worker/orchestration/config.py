@@ -47,6 +47,18 @@ class WorkerSettings:
     visibility_timeout_seconds: int
     worker_concurrency: int
     processing_temp_root: Path | None
+    export_lease_seconds: float = 300
+    export_heartbeat_interval_seconds: float = 30
+    export_soft_time_limit_seconds: int = 1800
+    export_hard_time_limit_seconds: int = 1860
+    export_s3_connect_timeout_seconds: float = 5
+    export_s3_read_timeout_seconds: float = 30
+    export_max_frames: int = 1000
+    export_max_total_source_bytes: int = 2 * 1024 * 1024 * 1024
+    export_max_zip_bytes: int = 2 * 1024 * 1024 * 1024
+    export_max_temp_bytes: int = 2_200_000_000
+    export_min_temp_free_bytes: int = 256 * 1024 * 1024
+    export_stale_temp_seconds: int = 7200
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
@@ -60,6 +72,18 @@ class WorkerSettings:
         if urlsplit(endpoint).scheme not in {"http", "https"}:
             raise ValueError("OBJECT_STORAGE_ENDPOINT must use http or https")
         temp_root = os.environ.get("PROCESSING_TEMP_ROOT")
+        export_lease = _positive_float("FRAME_EXPORT_LEASE_SECONDS", "300")
+        export_heartbeat = _positive_float(
+            "FRAME_EXPORT_HEARTBEAT_INTERVAL_SECONDS", "30"
+        )
+        if export_heartbeat >= export_lease / 2:
+            raise ValueError(
+                "Export heartbeat interval must be less than half the lease"
+            )
+        soft_limit = _positive_int("FRAME_EXPORT_SOFT_TIME_LIMIT_SECONDS", "1800")
+        hard_limit = _positive_int("FRAME_EXPORT_HARD_TIME_LIMIT_SECONDS", "1860")
+        if hard_limit <= soft_limit:
+            raise ValueError("Export hard time limit must exceed soft time limit")
         return cls(
             database_url=os.environ.get(
                 "DATABASE_URL",
@@ -91,4 +115,30 @@ class WorkerSettings:
             ),
             worker_concurrency=_positive_int("CELERY_WORKER_CONCURRENCY", "1"),
             processing_temp_root=Path(temp_root).resolve() if temp_root else None,
+            export_lease_seconds=export_lease,
+            export_heartbeat_interval_seconds=export_heartbeat,
+            export_soft_time_limit_seconds=soft_limit,
+            export_hard_time_limit_seconds=hard_limit,
+            export_s3_connect_timeout_seconds=_positive_float(
+                "FRAME_EXPORT_S3_CONNECT_TIMEOUT_SECONDS", "5"
+            ),
+            export_s3_read_timeout_seconds=_positive_float(
+                "FRAME_EXPORT_S3_READ_TIMEOUT_SECONDS", "30"
+            ),
+            export_max_frames=_positive_int("FRAME_EXPORT_MAX_FRAMES", "1000"),
+            export_max_total_source_bytes=_positive_int(
+                "FRAME_EXPORT_MAX_TOTAL_BYTES", "2147483648"
+            ),
+            export_max_zip_bytes=_positive_int(
+                "FRAME_EXPORT_MAX_ZIP_BYTES", "2147483648"
+            ),
+            export_max_temp_bytes=_positive_int(
+                "FRAME_EXPORT_MAX_TEMP_BYTES", "2200000000"
+            ),
+            export_min_temp_free_bytes=_positive_int(
+                "FRAME_EXPORT_MIN_TEMP_FREE_BYTES", "268435456"
+            ),
+            export_stale_temp_seconds=_positive_int(
+                "FRAME_EXPORT_STALE_TEMP_SECONDS", "7200"
+            ),
         )

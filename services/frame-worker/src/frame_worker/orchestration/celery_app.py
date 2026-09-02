@@ -24,5 +24,8 @@ celery_app.conf.update(
         "visibility_timeout": settings.visibility_timeout_seconds,
     },
     worker_concurrency=settings.worker_concurrency,
-    task_routes={"frame_worker.process_video": {"queue": "video-processing"}},
+    task_routes={
+        "frame_worker.process_video": {"queue": "video-processing"},
+        "frame_worker.create_frame_export": {"queue": "video-processing"},
+    },
 )

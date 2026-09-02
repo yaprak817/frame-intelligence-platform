@@ -17,6 +17,7 @@ from app.schemas.artifacts import (
 )
 from app.storage.s3 import (
     ObjectNotFoundError,
+    ObjectStream,
     ObjectTooLargeError,
     ResultObjectStorage,
 )
@@ -100,6 +101,28 @@ class ResultArtifactService:
             sha256=frame.sha256,
         )
 
+    async def frame_download(
+        self, job_id: UUID, frame_index: int
+    ) -> tuple[ObjectStream, str]:
+        _job, manifest = await self._load(job_id)
+        if frame_index < 0 or frame_index >= len(manifest.frames):
+            raise ArtifactNotFoundError
+        frame = manifest.frames[frame_index]
+        metadata = await self._storage.head(frame.object_key)
+        if (
+            metadata.size_bytes != frame.size_bytes
+            or metadata.content_type != frame.content_type
+        ):
+            raise ManifestInvalidError
+        filename = _download_filename(
+            frame.index, frame.timestamp_ms, frame.content_type
+        )
+        stream = await self._storage.open_stream(frame.object_key)
+        if stream.metadata != metadata:
+            stream.body.close()
+            raise ManifestInvalidError
+        return stream, filename
+
     async def _load(self, job_id: UUID) -> tuple[ProcessingJob, StoredManifestV1]:
         job = await self._repository.get(job_id)
         if job is None:
@@ -129,6 +152,17 @@ class ResultArtifactService:
             raise ManifestInvalidError
         manifest = validate_manifest(stored.payload, job.id, reference.run_token)
         return job, manifest
+
+
+def _download_filename(index: int, timestamp_ms: int, content_type: str) -> str:
+    extension = {"image/jpeg": "jpg", "image/png": "png"}.get(content_type)
+    if extension is None:
+        raise ManifestInvalidError
+    hours, remainder = divmod(timestamp_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, millis = divmod(remainder, 1000)
+    prefix = f"frame_{index + 1:04d}_{hours:02d}-{minutes:02d}-{seconds:02d}"
+    return f"{prefix}.{millis:03d}.{extension}"
 
 
 def parse_result_reference(

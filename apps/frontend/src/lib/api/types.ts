@@ -81,3 +81,10 @@ export interface FrameAccessResponse {
   size_bytes: number;
   sha256: string;
 }
+
+export type FrameExportStatus = "PREPARING" | "READY" | "FAILED";
+export interface FrameExportResponse {
+  id: string; job_id: string; status: FrameExportStatus; mode: "all" | "selected";
+  frame_count: number; created_at: string; completed_at: string | null;
+  status_url: string; download_url: string | null; failure_code: string | null;
+}

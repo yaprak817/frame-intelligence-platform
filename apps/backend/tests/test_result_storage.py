@@ -5,7 +5,9 @@ import pytest
 
 import app.storage.s3 as s3_module
 from app.storage.s3 import (
+    ObjectMetadata,
     ObjectStorageError,
+    ObjectStream,
     ObjectTooLargeError,
     S3ResultObjectStorage,
 )
@@ -56,6 +58,19 @@ class FakeS3Client:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+def test_stream_cancellation_closes_body_without_buffering_the_object() -> None:
+    body = FakeBody(b"chunk")
+
+    async def consume_then_disconnect() -> None:
+        iterator = ObjectStream(body, ObjectMetadata(5, "application/zip")).chunks(2)
+        assert await anext(iterator) == b"chunk"
+        await iterator.aclose()
+
+    asyncio.run(consume_then_disconnect())
+    assert body.read_sizes == [2]
+    assert body.close_calls == 1
 
 
 def _storage(client: FakeS3Client) -> S3ResultObjectStorage:

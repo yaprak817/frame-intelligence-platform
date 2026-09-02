@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.jobs import JobStatus, OutboxEventType
+from app.models.frame_export import FrameExportOutbox
 from app.models.job_outbox import JobOutbox
 from app.models.processing_job import ProcessingJob
 from app.outbox.celery_client import JobMessagePublisher
@@ -47,10 +48,53 @@ class OutboxRepository:
     ) -> int:
         processed = 0
         for _ in range(batch_size):
-            if not await self._publish_one(publisher):
+            if not await self._publish_one(
+                publisher
+            ) and not await self._publish_one_export(publisher):
                 break
             processed += 1
         return processed
+
+    async def _publish_one_export(self, publisher: JobMessagePublisher) -> bool:
+        async with self._session_factory() as session, session.begin():
+            now = datetime.now(UTC)
+            event = (
+                await session.execute(
+                    select(FrameExportOutbox)
+                    .where(
+                        FrameExportOutbox.published_at.is_(None),
+                        FrameExportOutbox.next_attempt_at <= now,
+                    )
+                    .order_by(FrameExportOutbox.created_at)
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+            if event is None:
+                return False
+            try:
+                if not isinstance(event.payload, dict) or set(event.payload) != {
+                    "export_id"
+                }:
+                    raise InvalidOutboxPayloadError("Invalid export payload")
+                export_id = UUID(str(event.payload["export_id"]))
+                if export_id != event.export_id:
+                    raise InvalidOutboxPayloadError("Export aggregate mismatch")
+                await asyncio.to_thread(publisher.publish_export, export_id)
+            except Exception as error:
+                event.attempt_count += 1
+                event.next_attempt_at = now + timedelta(
+                    seconds=self._backoff_seconds(event.attempt_count)
+                )
+                logger.warning(
+                    "Export outbox publish deferred event_id=%s error_type=%s",
+                    event.id,
+                    type(error).__name__,
+                )
+                return True
+            event.published_at = now
+            event.attempt_count += 1
+            return True
 
     async def _publish_one(self, publisher: JobMessagePublisher) -> bool:
         async with self._session_factory() as session, session.begin():

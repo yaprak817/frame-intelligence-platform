@@ -7,6 +7,7 @@ import type {
   ProcessingConfig,
   PublicResultManifest,
   FrameAccessResponse,
+  FrameExportResponse,
 } from "./types";
 
 const STATUSES: JobStatus[] = [
@@ -184,4 +185,26 @@ export async function getManifestDownload(jobId: string, signal?: AbortSignal): 
   if (!response.ok) throw await errorFromResponse(response);
   if (!(response.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) throw new ApiError(502, "MANIFEST_INVALID");
   return response.blob();
+}
+
+function isFrameExport(value: unknown): value is FrameExportResponse {
+  if (!isRecord(value) || !exactKeys(value, ["id", "job_id", "status", "mode", "frame_count", "created_at", "completed_at", "status_url", "download_url", "failure_code"])) return false;
+  return canonicalUuid(value.id as string) !== null && canonicalUuid(value.job_id as string) !== null &&
+    ["PREPARING", "READY", "FAILED"].includes(value.status as string) && ["all", "selected"].includes(value.mode as string) &&
+    isSafeInteger(value.frame_count) && isUtcDate(value.created_at) && (value.completed_at === null || isUtcDate(value.completed_at)) &&
+    typeof value.status_url === "string" && (value.download_url === null || typeof value.download_url === "string") &&
+    (value.failure_code === null || typeof value.failure_code === "string");
+}
+
+export async function createFrameExport(jobId: string, mode: "all" | "selected", frameIndices: number[] | null, signal?: AbortSignal): Promise<FrameExportResponse> {
+  const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/exports`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mode === "all" ? { mode } : { mode, frame_indices: frameIndices }), cache: "no-store", signal });
+  if (!response.ok) throw await errorFromResponse(response);
+  const payload: unknown = await response.json(); if (!isFrameExport(payload)) throw new ApiError(502); return payload;
+}
+
+export async function getFrameExport(statusUrl: string, signal?: AbortSignal): Promise<FrameExportResponse> {
+  const response = await fetch(statusUrl, { cache: "no-store", signal });
+  if (!response.ok) throw await errorFromResponse(response);
+  const payload: unknown = await response.json(); if (!isFrameExport(payload)) throw new ApiError(502); return payload;
 }

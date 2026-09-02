@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024
     object_storage_multipart_chunk_bytes: int = 8 * 1024 * 1024
     result_artifact_url_ttl_seconds: int = 300
+    frame_export_max_frames: int = 1000
+    frame_export_max_total_bytes: int = 2 * 1024 * 1024 * 1024
     celery_broker_url: str = "redis://localhost:6379/0"
     redis_url: str | None = None
     cors_allow_origins: list[str] = Field(default_factory=list)
@@ -146,6 +148,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RESULT_ARTIFACT_URL_TTL_SECONDS must be between 30 and 900"
             )
+        if not 1 <= self.frame_export_max_frames <= 10_000:
+            raise ValueError("FRAME_EXPORT_MAX_FRAMES must be between 1 and 10000")
+        if self.frame_export_max_total_bytes <= 0:
+            raise ValueError("FRAME_EXPORT_MAX_TOTAL_BYTES must be greater than zero")
         if self.outbox_poll_interval_seconds <= 0:
             raise ValueError("OUTBOX_POLL_INTERVAL_SECONDS must be greater than zero")
         if not 1 <= self.outbox_batch_size <= 100:

@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 from typing import Annotated
 from uuid import UUID
 
@@ -9,20 +11,28 @@ from fastapi import (
     Header,
     HTTPException,
     Path,
+    Request,
     Response,
     UploadFile,
     status,
 )
 from pydantic import TypeAdapter, ValidationError
+from starlette.responses import StreamingResponse
 
 from app.api.dependencies import (
     authorize_result_access,
+    get_frame_export_service,
     get_job_service,
     get_result_artifact_service,
 )
 from app.domain.jobs import JobStatus, SourceType
 from app.models.processing_job import ProcessingJob
 from app.schemas.artifacts import FrameAccessResponse, PublicResultManifest
+from app.schemas.exports import (
+    CreateFrameExportRequest,
+    ExportStatus,
+    FrameExportResponse,
+)
 from app.schemas.jobs import (
     IdempotencyKey,
     JobFailureResponse,
@@ -31,6 +41,11 @@ from app.schemas.jobs import (
     JobSubmissionResponse,
     ProcessingConfigRequest,
     URLJobRequest,
+)
+from app.services.frame_exports import (
+    ExportNotFoundError,
+    ExportNotReadyError,
+    FrameExportService,
 )
 from app.services.job_service import (
     IdempotencyConflictError,
@@ -55,6 +70,9 @@ ResultServiceDependency = Annotated[
     ResultArtifactService, Depends(get_result_artifact_service)
 ]
 ResultAuthorizationDependency = Annotated[None, Depends(authorize_result_access)]
+ExportServiceDependency = Annotated[
+    FrameExportService, Depends(get_frame_export_service)
+]
 
 
 def _idempotency_key(value: str | None) -> str:
@@ -231,6 +249,126 @@ async def create_frame_access(
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return result
+
+
+@router.get("/{job_id}/result/frames/{frame_index}/download")
+async def download_frame(
+    job_id: str,
+    frame_index: Annotated[int, Path(ge=0)],
+    service: ResultServiceDependency,
+    _authorization: ResultAuthorizationDependency,
+) -> StreamingResponse:
+    try:
+        stream, filename = await service.frame_download(
+            _result_job_id(job_id), frame_index
+        )
+    except Exception as error:
+        _raise_result_error(error)
+        raise
+    return StreamingResponse(
+        stream.chunks(),
+        media_type=stream.metadata.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(stream.metadata.size_bytes),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/{job_id}/exports", response_model=FrameExportResponse, status_code=202)
+async def create_frame_export(
+    job_id: str,
+    request: CreateFrameExportRequest,
+    response: Response,
+    service: ExportServiceDependency,
+    _authorization: ResultAuthorizationDependency,
+) -> FrameExportResponse:
+    try:
+        result = await service.create(_result_job_id(job_id), request)
+    except ValueError as error:
+        raise _api_error(
+            422, "INVALID_FRAME_SELECTION", "Frame selection is invalid"
+        ) from error
+    except Exception as error:
+        _raise_result_error(error)
+        raise
+    response.headers["Location"] = result.status_url
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.get("/{job_id}/exports/{export_id}", response_model=FrameExportResponse)
+async def get_frame_export(
+    job_id: str,
+    export_id: UUID,
+    response: Response,
+    service: ExportServiceDependency,
+    _authorization: ResultAuthorizationDependency,
+) -> FrameExportResponse:
+    try:
+        export = await service.get(_result_job_id(job_id), export_id)
+    except ExportNotFoundError as error:
+        raise _api_error(404, "EXPORT_NOT_FOUND", "Export not found") from error
+    response.headers["Cache-Control"] = "no-store"
+    return service.response(export)
+
+
+@router.get("/{job_id}/exports/{export_id}/download")
+async def download_frame_export(
+    job_id: str,
+    export_id: UUID,
+    request: Request,
+    service: ExportServiceDependency,
+    _authorization: ResultAuthorizationDependency,
+) -> StreamingResponse:
+    try:
+        export = await service.get(_result_job_id(job_id), export_id)
+        if export.status != ExportStatus.READY or not export.artifact_reference:
+            raise ExportNotReadyError
+        storage = request.app.state.result_object_storage
+        prefix = f"s3://{storage.bucket}/"
+        if not export.artifact_reference.startswith(prefix):
+            raise ExportNotFoundError
+        key = export.artifact_reference[len(prefix) :]
+        metadata = await storage.head(key)
+        if (
+            metadata.size_bytes != export.artifact_size_bytes
+            or metadata.content_type != "application/zip"
+            or metadata.sha256 != export.artifact_sha256
+        ):
+            raise ExportNotFoundError
+        verification_stream = await storage.open_stream(key)
+        digest = hashlib.sha256()
+        verified_size = 0
+        async for chunk in verification_stream.chunks():
+            verified_size += len(chunk)
+            if verified_size > metadata.size_bytes:
+                raise ExportNotFoundError
+            digest.update(chunk)
+        if (
+            verification_stream.metadata != metadata
+            or verified_size != metadata.size_bytes
+            or digest.hexdigest() != export.artifact_sha256
+        ):
+            raise ExportNotFoundError
+        stream = await storage.open_stream(key)
+        if stream.metadata != metadata:
+            await asyncio.to_thread(stream.body.close)
+            raise ExportNotFoundError
+    except ExportNotReadyError as error:
+        raise _api_error(409, "EXPORT_NOT_READY", "Export is not ready") from error
+    except ExportNotFoundError as error:
+        raise _api_error(404, "EXPORT_NOT_FOUND", "Export not found") from error
+    return StreamingResponse(
+        stream.chunks(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="frames-{export.id}.zip"',
+            "Content-Length": str(stream.metadata.size_bytes),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/{job_id}/result/manifest")

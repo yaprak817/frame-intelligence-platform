@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JobStatus, JobStatusResponse, PublicResultManifest } from "@/lib/api/types";
 
-const api = vi.hoisted(() => ({ getJobStatus: vi.fn(), getJobResult: vi.fn(), getManifestDownload: vi.fn(), createFrameAccess: vi.fn() }));
+const api = vi.hoisted(() => ({ getJobStatus: vi.fn(), getJobResult: vi.fn(), getManifestDownload: vi.fn(), createFrameAccess: vi.fn(), createFrameExport: vi.fn(), getFrameExport: vi.fn() }));
 vi.mock("@/lib/api/client", async (original) => ({ ...(await original<typeof import("@/lib/api/client")>()), ...api }));
 import { ResultGallery } from "@/components/results/result-gallery";
 
@@ -17,7 +17,28 @@ describe("result gallery", () => {
     HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) { this.setAttribute("open", ""); });
     HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) { this.removeAttribute("open"); });
   });
-  afterEach(() => { Object.values(api).forEach((mock) => mock.mockReset()); vi.unstubAllGlobals(); });
+  afterEach(() => { Object.values(api).forEach((mock) => mock.mockReset()); vi.unstubAllGlobals(); vi.useRealTimers(); });
+  it("cancels an export polling timer on unmount", async () => {
+    vi.useFakeTimers();
+    api.getJobStatus.mockResolvedValue(job("SUCCEEDED")); api.getJobResult.mockResolvedValue(manifest());
+    api.createFrameExport.mockResolvedValue({ id: "22222222-2222-4222-8222-222222222222", job_id: jobId, status: "PREPARING", mode: "all", frame_count: 1, created_at: "2026-08-24T10:00:00Z", completed_at: null, status_url: "/status", download_url: null, failure_code: null });
+    const view = render(<ResultGallery jobId={jobId} />);
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: /Tüm frame/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /Tüm frame/ }));
+    await vi.waitFor(() => expect(api.createFrameExport).toHaveBeenCalledOnce());
+    const signal = api.createFrameExport.mock.calls[0][3] as AbortSignal;
+    view.unmount();
+    expect(signal.aborted).toBe(true); expect(vi.getTimerCount()).toBe(0); expect(api.getFrameExport).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+  it("deduplicates synchronous export clicks", async () => {
+    api.getJobStatus.mockResolvedValue(job("SUCCEEDED")); api.getJobResult.mockResolvedValue(manifest());
+    api.createFrameExport.mockImplementation(() => new Promise(() => {}));
+    render(<ResultGallery jobId={jobId} />);
+    const button = await screen.findByRole("button", { name: /Tüm frame/ });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(api.createFrameExport).toHaveBeenCalledTimes(1);
+  });
   it.each(["PENDING_DISPATCH", "QUEUED", "RUNNING"] as JobStatus[])("shows not-ready for %s without requesting result", async (status) => {
     api.getJobStatus.mockResolvedValue(job(status)); render(<ResultGallery jobId={jobId} />);
     expect(await screen.findByRole("heading", { name: "Sonuç henüz hazır değil" })).toBeVisible(); expect(api.getJobResult).not.toHaveBeenCalled();
