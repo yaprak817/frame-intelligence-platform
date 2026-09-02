@@ -4,10 +4,12 @@ from uuid import UUID
 from celery import Celery
 
 PROCESS_VIDEO_TASK = "frame_worker.process_video"
+CREATE_FRAME_EXPORT_TASK = "frame_worker.create_frame_export"
 
 
 class JobMessagePublisher(Protocol):
     def publish(self, job_id: UUID) -> None: ...
+    def publish_export(self, export_id: UUID) -> None: ...
 
 
 class CeleryJobMessagePublisher:
@@ -24,6 +26,13 @@ class CeleryJobMessagePublisher:
         self._app.send_task(
             PROCESS_VIDEO_TASK,
             kwargs={"job_id": str(job_id)},
+            queue="video-processing",
+        )
+
+    def publish_export(self, export_id: UUID) -> None:
+        self._app.send_task(
+            CREATE_FRAME_EXPORT_TASK,
+            kwargs={"export_id": str(export_id)},
             queue="video-processing",
         )
 

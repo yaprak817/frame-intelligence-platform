@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -30,6 +31,7 @@ class ObjectTooLargeError(RuntimeError):
 class ObjectMetadata:
     size_bytes: int
     content_type: str
+    sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,19 @@ class BoundedObject:
     metadata: ObjectMetadata
 
 
+@dataclass
+class ObjectStream:
+    body: Any
+    metadata: ObjectMetadata
+
+    async def chunks(self, chunk_bytes: int = 1024 * 1024) -> AsyncIterator[bytes]:
+        try:
+            while chunk := await asyncio.to_thread(self.body.read, chunk_bytes):
+                yield chunk
+        finally:
+            await asyncio.to_thread(self.body.close)
+
+
 class ResultObjectStorage(Protocol):
     bucket: str
 
@@ -51,7 +66,11 @@ class ResultObjectStorage(Protocol):
 
     async def head(self, object_key: str) -> ObjectMetadata: ...
 
-    async def presign(self, object_key: str, ttl_seconds: int) -> PresignedObject: ...
+    async def open_stream(self, object_key: str) -> ObjectStream: ...
+
+    async def presign(
+        self, object_key: str, ttl_seconds: int, *, filename: str | None = None
+    ) -> PresignedObject: ...
 
 
 @dataclass(frozen=True)
@@ -315,6 +334,7 @@ class S3ResultObjectStorage:
             return ObjectMetadata(
                 size_bytes=int(result["ContentLength"]),
                 content_type=str(result.get("ContentType") or ""),
+                sha256=(result.get("Metadata") or {}).get("sha256"),
             )
         except ClientError as error:
             if _is_not_found(error):
@@ -361,13 +381,27 @@ class S3ResultObjectStorage:
                 except Exception:
                     pass
 
-    async def presign(self, object_key: str, ttl_seconds: int) -> PresignedObject:
+    async def presign(
+        self, object_key: str, ttl_seconds: int, *, filename: str | None = None
+    ) -> PresignedObject:
         signed_at = datetime.now(UTC)
         try:
             url = await asyncio.to_thread(
                 self._signing_client.generate_presigned_url,
                 "get_object",
-                Params={"Bucket": self.bucket, "Key": object_key},
+                Params={
+                    "Bucket": self.bucket,
+                    "Key": object_key,
+                    **(
+                        {
+                            "ResponseContentDisposition": (
+                                f'attachment; filename="{filename}"'
+                            )
+                        }
+                        if filename
+                        else {}
+                    ),
+                },
                 ExpiresIn=ttl_seconds,
             )
         except Exception as error:
@@ -376,6 +410,28 @@ class S3ResultObjectStorage:
             url=url,
             expires_at=signed_at + timedelta(seconds=ttl_seconds),
         )
+
+    async def open_stream(self, object_key: str) -> ObjectStream:
+        try:
+            response = await asyncio.to_thread(
+                self._internal_client.get_object,
+                Bucket=self.bucket,
+                Key=object_key,
+            )
+            metadata = ObjectMetadata(
+                size_bytes=int(response["ContentLength"]),
+                content_type=str(
+                    response.get("ContentType") or "application/octet-stream"
+                ),
+                sha256=(response.get("Metadata") or {}).get("sha256"),
+            )
+            return ObjectStream(body=response["Body"], metadata=metadata)
+        except ClientError as error:
+            if _is_not_found(error):
+                raise ObjectNotFoundError from error
+            raise ObjectStorageError("Object storage read failed") from error
+        except Exception as error:
+            raise ObjectStorageError("Object storage read failed") from error
 
 
 def _is_not_found(error: ClientError) -> bool:

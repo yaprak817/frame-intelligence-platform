@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../../../..");
@@ -182,6 +183,31 @@ function manifestIsPublic(value, jobId) {
   return visit(value);
 }
 
+
+async function inspectZip(path) {
+  const script = [
+    "import hashlib,json,re,sys,zipfile",
+    "z=zipfile.ZipFile(sys.argv[1])",
+    "names=z.namelist()",
+    "assert names and names[-1]=='manifest.json'",
+    "assert all(re.fullmatch(r'[A-Za-z0-9_.-]+',n) and '..' not in n for n in names)",
+    "manifest=json.loads(z.read('manifest.json'))",
+    "hashes={n:hashlib.sha256(z.read(n)).hexdigest() for n in names if n!='manifest.json'}",
+    "print(json.dumps({'names':names,'manifest':manifest,'hashes':hashes},separators=(',',':')))",
+  ].join(";");
+  const result = await run("python", ["-c", script, path], { timeoutMs: 30_000 });
+  return JSON.parse(result.stdout);
+}
+
+function assertExportManifestIsPublic(manifest, jobId) {
+  if (!manifest || manifest.schema_version !== 1 || manifest.job_id !== jobId || !UUID.test(manifest.export_id) || !Array.isArray(manifest.frames)) {
+    throw new Error("ZIP public manifest sözleşmesi geçersiz.");
+  }
+  if (/bucket|object_key|storage|endpoint|credential|presigned|local_path/i.test(JSON.stringify(manifest))) {
+    throw new Error("ZIP manifest dahili storage bilgisi içeriyor.");
+  }
+}
+
 async function browserFlow(baseUrl, videoPath) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ acceptDownloads: true });
@@ -217,6 +243,13 @@ async function browserFlow(baseUrl, videoPath) {
     if (!UUID.test(submittedJobId) || uploadBody?.status !== "PENDING_DISPATCH") {
       throw new Error("Upload geçerli bir PENDING_DISPATCH işi döndürmedi.");
     }
+    const pendingExportStatus = await page.evaluate(async (id) => {
+      const response = await fetch(`/api/v1/jobs/${encodeURIComponent(id)}/exports`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "all" }),
+      });
+      return response.status;
+    }, submittedJobId);
+    if (pendingExportStatus !== 409) throw new Error("SUCCEEDED olmayan job export reddedilmedi.");
     if (!statuses.includes(uploadBody.status)) statuses.push(uploadBody.status);
     await Promise.race([
       page.waitForURL(/\/jobs\/[0-9a-f-]+$/, { timeout: 60_000 }),
@@ -267,6 +300,76 @@ async function browserFlow(baseUrl, videoPath) {
     const manifest = JSON.parse(await readFile(downloadPath, "utf8"));
     if (!manifestIsPublic(manifest, jobId)) throw new Error("İndirilen public manifest doğrulanamadı.");
     if (!download.suggestedFilename().includes(jobId)) throw new Error("Manifest dosya adı job ilişkisini korumuyor.");
+
+    const frameDownloadPromise = page.waitForEvent("download", { timeout: 30_000 });
+    await page.getByRole("link", { name: "İndir" }).first().click();
+    const frameDownload = await frameDownloadPromise;
+    const frameResponse = await context.request.get(`${baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/result/frames/0/download`, { timeout: 30_000 });
+    const framePath = await frameDownload.path();
+    if (!framePath || frameResponse.headers()["content-type"] !== "image/jpeg") throw new Error("Tek frame download response geçersiz.");
+    const disposition = frameResponse.headers()["content-disposition"] ?? "";
+    if (!/^attachment; filename="frame_0001_\d{2}-\d{2}-\d{2}\.\d{3}\.jpg"$/.test(disposition)) throw new Error("Tek frame Content-Disposition geçersiz.");
+    const frameBytes = await frameResponse.body();
+    if (createHash("sha256").update(frameBytes).digest("hex") !== manifest.frames[0].sha256) throw new Error("Tek frame SHA-256 uyuşmuyor.");
+
+    const selectedIndices = [0, 1];
+    const invalidStatuses = await page.evaluate(async ({ id, missing }) => {
+      const payloads = [
+        { mode: "selected", frame_indices: [] },
+        { mode: "selected", frame_indices: [0, 0] },
+        { mode: "selected", frame_indices: [-1] },
+        { mode: "selected", frame_indices: [missing] },
+      ];
+      return Promise.all(payloads.map(async (body) => (await fetch(`/api/v1/jobs/${encodeURIComponent(id)}/exports`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      })).status));
+    }, { id: jobId, missing: manifest.frames.length });
+    if (invalidStatuses.some((status) => status !== 422)) throw new Error("Geçersiz frame seçimleri strict reddedilmedi.");
+    const prepared = await page.evaluate(async ({ id, indices }) => {
+      const created = await fetch(`/api/v1/jobs/${encodeURIComponent(id)}/exports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "selected", frame_indices: indices }) });
+      const body = await created.json();
+      const download = await fetch(body.download_url ?? `/api/v1/jobs/${encodeURIComponent(id)}/exports/${encodeURIComponent(body.id)}/download`, { redirect: "manual" });
+      return { createStatus: created.status, downloadStatus: download.status, body };
+    }, { id: jobId, indices: selectedIndices });
+    if (prepared.createStatus !== 202 || prepared.downloadStatus !== 409 || !UUID.test(prepared.body?.id ?? "")) throw new Error("Hazır olmayan export download sözleşmesi geçersiz.");
+    for (const index of selectedIndices) await page.getByRole("checkbox", { name: `Kare ${index + 1} seç` }).check();
+    const selectedCreatePromise = page.waitForResponse((response) => response.request().method() === "POST" && /\/exports$/.test(new URL(response.url()).pathname), { timeout: 30_000 });
+    const selectedDownloadPromise = page.waitForEvent("download", { timeout: 120_000 });
+    await page.getByRole("button", { name: "Seçilenleri ZIP indir" }).click();
+    const selectedCreated = await selectedCreatePromise;
+    if (selectedCreated.status() !== 202) throw new Error("Seçili export 202 dönmedi.");
+    const selectedBody = await selectedCreated.json();
+    if (selectedBody?.id !== prepared.body.id || !["PREPARING", "READY"].includes(selectedBody?.status)) throw new Error("Seçili export idempotent DTO geçersiz.");
+    const selectedDownload = await selectedDownloadPromise;
+    const selectedPath = await selectedDownload.path();
+    if (!selectedPath) throw new Error("Seçili ZIP indirilemedi.");
+    const selectedZip = await inspectZip(selectedPath);
+    assertExportManifestIsPublic(selectedZip.manifest, jobId);
+    if (selectedZip.names.length !== selectedIndices.length + 1 || selectedZip.manifest.frames.length !== selectedIndices.length) throw new Error("Seçili ZIP entry sayısı geçersiz.");
+    for (const [position, sourceIndex] of selectedIndices.entries()) {
+      const exported = selectedZip.manifest.frames[position];
+      if (exported.index !== sourceIndex || selectedZip.hashes[exported.filename] !== manifest.frames[sourceIndex].sha256) throw new Error("Seçili ZIP frame/hash sırası geçersiz.");
+    }
+    if (selectedZip.manifest.frames.some((frame) => frame.index === 2)) throw new Error("Seçilmeyen frame ZIP içinde.");
+    const repeated = await page.evaluate(async ({ id, indices }) => {
+      const response = await fetch(`/api/v1/jobs/${encodeURIComponent(id)}/exports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "selected", frame_indices: indices }) });
+      return { status: response.status, body: await response.json() };
+    }, { id: jobId, indices: selectedIndices });
+    if (repeated.status !== 202 || repeated.body?.id !== selectedBody.id) throw new Error("Export idempotency doğrulanamadı.");
+
+    const allCreatePromise = page.waitForResponse((response) => response.request().method() === "POST" && /\/exports$/.test(new URL(response.url()).pathname), { timeout: 30_000 });
+    const allDownloadPromise = page.waitForEvent("download", { timeout: 120_000 });
+    await page.getByRole("button", { name: "Tüm frame’leri ZIP indir" }).click();
+    if ((await allCreatePromise).status() !== 202) throw new Error("Tüm-frame export 202 dönmedi.");
+    const allDownload = await allDownloadPromise;
+    const allPath = await allDownload.path();
+    if (!allPath) throw new Error("Tüm-frame ZIP indirilemedi.");
+    const allZip = await inspectZip(allPath);
+    assertExportManifestIsPublic(allZip.manifest, jobId);
+    if (allZip.manifest.frames.length !== manifest.frames.length) throw new Error("Tüm-frame ZIP sayısı geçersiz.");
+    for (const [index, exported] of allZip.manifest.frames.entries()) {
+      if (exported.index !== index || allZip.hashes[exported.filename] !== manifest.frames[index].sha256) throw new Error("Tüm-frame ZIP sıra/hash geçersiz.");
+    }
     return { statuses: statuses.join(" -> "), framesSaved, jobId };
   } finally {
     await context.close();

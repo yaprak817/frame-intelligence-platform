@@ -3,9 +3,16 @@ import random
 import time
 from uuid import UUID
 
-from celery.exceptions import Reject
+from celery.exceptions import MaxRetriesExceededError, Reject
 
 from frame_worker.orchestration.celery_app import celery_app, settings
+from frame_worker.orchestration.exports import (
+    ExportLeaseBusy,
+    PermanentExportError,
+    TransientExportError,
+    create_export,
+    fail_unleased_export,
+)
 from frame_worker.orchestration.repository import JobRepository
 from frame_worker.orchestration.runner import (
     JobRunner,
@@ -28,7 +35,7 @@ def build_runner() -> JobRunner:
 @celery_app.task(
     bind=True,
     name="frame_worker.process_video",
-    max_retries=2,
+    max_retries=0,
     acks_late=True,
     reject_on_worker_lost=True,
     ignore_result=True,
@@ -69,3 +76,43 @@ def process_video(self, job_id: str) -> None:
             raise self.retry(exc=error, countdown=countdown) from error
     finally:
         runner.repository.close()
+
+
+@celery_app.task(
+    bind=True,
+    name="frame_worker.create_frame_export",
+    max_retries=2,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    ignore_result=True,
+    soft_time_limit=settings.export_soft_time_limit_seconds,
+    time_limit=settings.export_hard_time_limit_seconds,
+)
+def create_frame_export(self, export_id: str) -> None:
+    try:
+        parsed = UUID(export_id)
+    except (TypeError, ValueError) as error:
+        raise Reject("Invalid export identifier", requeue=False) from error
+    _execute_export_task(self, parsed)
+
+
+def _execute_export_task(task, export_id: UUID) -> None:
+    try:
+        create_export(export_id, settings)
+    except PermanentExportError:
+        logger.warning("Frame export permanently rejected export_id=%s", export_id)
+        raise
+    except ExportLeaseBusy as error:
+        countdown = settings.export_lease_seconds + random.uniform(1, 5)
+        logger.warning("Frame export lease wait scheduled export_id=%s", export_id)
+        raise task.retry(exc=error, countdown=countdown) from error
+    except TransientExportError as error:
+        countdown = min(60, (2**task.request.retries) * 5)
+        countdown += random.uniform(0, countdown / 2)
+        logger.warning("Frame export retry scheduled export_id=%s", export_id)
+        try:
+            raise task.retry(countdown=countdown) from error
+        except MaxRetriesExceededError as exhausted:
+            fail_unleased_export(export_id, settings)
+            logger.error("Frame export retry budget exhausted export_id=%s", export_id)
+            raise error from exhausted

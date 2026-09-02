@@ -160,6 +160,17 @@ _RESULT_PATHS = (
         "POST",
         re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result/frames/[0-9]+/access$"),
     ),
+    (
+        "GET",
+        re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result/frames/[0-9]+/download$"),
+    ),
+    ("POST", re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/exports$")),
+    (
+        "GET",
+        re.compile(
+            r"^/api/v1/jobs/[0-9a-fA-F-]{36}/exports/[0-9a-fA-F-]{36}(?:/download)?$"
+        ),
+    ),
 )
 
 
