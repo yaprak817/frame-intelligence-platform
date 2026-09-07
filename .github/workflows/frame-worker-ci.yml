@@ -155,8 +155,11 @@ jobs:
       TEST_DATABASE_ADMIN_URL: postgresql://frame_user:test_password@localhost:5432/postgres
       CELERY_BROKER_URL: redis://localhost:6379/0
       PYTHONDONTWRITEBYTECODE: "1"
-      ASYNC_CLEANUP_RECEIPT: ${{ runner.temp }}/issue35-cleanup.receipt
     steps:
+      - name: Configure async integration temp root
+        shell: bash
+        run: |
+          printf '%s\n' "ASYNC_CLEANUP_RECEIPT=${RUNNER_TEMP}/issue35-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-cleanup.receipt" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
         with:
