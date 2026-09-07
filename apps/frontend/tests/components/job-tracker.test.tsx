@@ -7,7 +7,7 @@ vi.mock("@/hooks/use-job-polling", () => ({ useJobPolling: () => useJobPolling()
 import { JobTracker } from "@/components/jobs/job-tracker";
 
 function response(status: JobStatus): JobStatusResponse {
-  return { id: "job-1", status, source_type: "UPLOAD", source: "clip.mp4", created_at: "2026-08-24T10:00:00Z", started_at: null, completed_at: null, failure: status === "FAILED" ? { code: "INVALID_VIDEO", message: "internal worker detail" } : null, result: status === "SUCCEEDED" ? { available: true, metadata_url: "/api/v1/jobs/job-1/result", manifest_download_url: "/api/v1/jobs/job-1/result/manifest" } : null };
+  return { id: "job-1", status, source_type: "UPLOAD", source: "clip.mp4", created_at: "2026-08-24T10:00:00Z", started_at: null, completed_at: null, failure: status === "FAILED" ? { code: "INVALID_VIDEO", message: "internal worker detail" } : null, result: status === "SUCCEEDED" ? { result_kind: "VIDEO_FRAMES", available: true, metadata_url: "/api/v1/jobs/job-1/result", manifest_download_url: "/api/v1/jobs/job-1/result/manifest" } : null };
 }
 
 describe("job tracker", () => {

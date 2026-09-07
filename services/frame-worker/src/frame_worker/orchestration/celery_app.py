@@ -22,10 +22,12 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
     broker_transport_options={
         "visibility_timeout": settings.visibility_timeout_seconds,
+        "global_keyprefix": settings.redis_keyprefix,
     },
     worker_concurrency=settings.worker_concurrency,
     task_routes={
-        "frame_worker.process_video": {"queue": "video-processing"},
-        "frame_worker.create_frame_export": {"queue": "video-processing"},
+        "frame_worker.process_video": {"queue": settings.task_queue},
+        "frame_worker.process_image_dataset": {"queue": settings.task_queue},
+        "frame_worker.create_frame_export": {"queue": settings.task_queue},
     },
 )

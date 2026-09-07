@@ -17,7 +17,7 @@ describe("result API runtime guards", () => {
     expect(isJobStatus({ ...base, status: "CANCELLED" })).toBe(false);
     expect(isJobStatus({ ...base, status: "FAILED", failure: { code: "INVALID_VIDEO", message: "detail" } })).toBe(true);
     expect(isJobStatus({ ...base, status: "FAILED", failure: null })).toBe(true);
-    expect(isJobStatus({ ...base, status: "SUCCEEDED", result: { available: true, metadata_url: `/api/v1/jobs/${jobId}/result`, manifest_download_url: `/api/v1/jobs/${jobId}/result/manifest` } })).toBe(true);
+    expect(isJobStatus({ ...base, status: "SUCCEEDED", result: { result_kind: "VIDEO_FRAMES", available: true, metadata_url: `/api/v1/jobs/${jobId}/result`, manifest_download_url: `/api/v1/jobs/${jobId}/result/manifest` } })).toBe(true);
   });
   it("canonicalizes equivalent UUID spellings without equating different or invalid UUIDs", () => {
     expect(canonicalUuid(jobId.toUpperCase())).toBe(jobId);

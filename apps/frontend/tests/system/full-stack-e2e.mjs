@@ -1,6 +1,6 @@
 import { chromium } from "@playwright/test";
 import { createServer } from "node:net";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -197,6 +197,80 @@ async function inspectZip(path) {
   ].join(";");
   const result = await run("python", ["-c", script, path], { timeoutMs: 30_000 });
   return JSON.parse(result.stdout);
+}
+
+async function inspectDatasetZip(path, mode) {
+  const script = [
+    "import hashlib,json,re,sys,zipfile",
+    "z=zipfile.ZipFile(sys.argv[1])",
+    "names=z.namelist()",
+    "assert names and 'manifest.json' in names",
+    "assert all(re.fullmatch(r'(?:images/)?[A-Za-z0-9_.-]+',n) and '..' not in n for n in names)",
+    "m=json.loads(z.read('manifest.json'))",
+    "assert 'run_token' not in m and 'object_key' not in json.dumps(m)",
+    "files=[n for n in names if n!='manifest.json']",
+    "assert len(files)==len(m['images'])",
+    "items={i['filename']:i for i in m['images']}",
+    "assert set(items)=={n.rsplit('/',1)[-1] for n in files}",
+    "assert all(len(z.read(n))==items[n.rsplit('/',1)[-1]]['size_bytes'] for n in files)",
+    "assert all(hashlib.sha256(z.read(n)).hexdigest()==items[n.rsplit('/',1)[-1]]['sha256'] for n in files)",
+    "def dims(d):\n i=2\n while i+9<len(d):\n  if d[i]!=255: i+=1; continue\n  marker=d[i+1]; size=int.from_bytes(d[i+2:i+4],'big')\n  if marker in (192,194): return (int.from_bytes(d[i+7:i+9],'big'),int.from_bytes(d[i+5:i+7],'big'))\n  i+=2+size\n raise AssertionError('JPEG dimensions missing')",
+    "assert sys.argv[2]!='yolo' or all(dims(z.read(n))==(640,640) for n in files)",
+    "print(json.dumps({'count':len(files),'manifest':m},separators=(',',':')))"
+  ].join("\n");
+  const result = await run("python", ["-c", script, path, mode], { timeoutMs: 30_000 });
+  return JSON.parse(result.stdout);
+}
+
+async function datasetBrowserFlow(baseUrl, paths, archive, temporaryDirectory) {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const statuses = [];
+  try {
+    await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
+    await page.getByRole("tab", { name: "Görsel veri seti" }).click();
+    if (archive) await page.getByRole("radio", { name: "ZIP arşivi" }).click();
+    await page.locator(".drop-zone input[type=file]").setInputFiles(paths);
+    const upload = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/v1\/jobs\/image-dataset\/?$/.test(new URL(response.url()).pathname), { timeout: 60_000 });
+    await page.locator('form button[type="submit"]').click();
+    const uploadResponse = await upload;
+    if (uploadResponse.status() !== 202) throw new Error(`Dataset upload HTTP ${uploadResponse.status()}.`);
+    const submitted = await uploadResponse.json();
+    const jobId = String(submitted.job_id || "").toLowerCase();
+    if (!UUID.test(jobId)) throw new Error("Dataset job ID geçersiz.");
+    const deadline = Date.now() + JOB_TIMEOUT_MS;
+    let terminal;
+    while (Date.now() < deadline) {
+      const response = await context.request.get(`${baseUrl}/api/v1/jobs/${jobId}`);
+      const body = await response.json();
+      if (body.status && !statuses.includes(body.status)) statuses.push(body.status);
+      if (TERMINAL.has(body.status)) { terminal = body.status; break; }
+      await page.waitForTimeout(250);
+    }
+    if (terminal !== "SUCCEEDED") throw new Error(`Dataset terminal=${terminal ?? "timeout"}.`);
+    const resultResponse = await context.request.get(`${baseUrl}/api/v1/jobs/${jobId}/result`);
+    const manifest = await resultResponse.json();
+    if (!resultResponse.ok() || manifest.dataset_type !== "image" || !Array.isArray(manifest.images) || manifest.images.length < 1) throw new Error("Dataset public manifest geçersiz.");
+    if (/bucket|object_key|run_token|credential|presigned/i.test(JSON.stringify(manifest))) throw new Error("Dataset public manifest internal alan içeriyor.");
+    await page.goto(`${baseUrl}/jobs/${jobId}/result`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await page.getByRole("heading", { name: "Veri seti analizi" }).waitFor({ state: "visible", timeout: 30_000 });
+    const preview = page.locator(".dataset-card img").first();
+    await preview.waitFor({ state: "visible", timeout: 30_000 });
+    await preview.evaluate((node) => new Promise((resolveImage, rejectImage) => { if (node.complete && node.naturalWidth > 0) return resolveImage(); node.addEventListener("load", resolveImage, { once: true }); node.addEventListener("error", rejectImage, { once: true }); }));
+    for (const [mode, url] of [["accepted", manifest.accepted_download_url], ["yolo", manifest.yolo_download_url]]) {
+      const response = await context.request.get(`${baseUrl}${url}`);
+      if (!response.ok() || response.headers()["content-type"] !== "application/zip") throw new Error(`${mode} ZIP indirilemedi.`);
+      const path = join(temporaryDirectory, `${jobId}-${mode}.zip`);
+      await writeFile(path, await response.body());
+      const inspected = await inspectDatasetZip(path, mode);
+      if (mode === "yolo" && inspected.count !== manifest.summary.recommended_count) throw new Error("YOLO öneri sayısı uyuşmuyor.");
+    }
+    return { jobId, statuses: statuses.join(" -> "), images: manifest.images.length };
+  } finally {
+    await context.close();
+    await browser.close();
+  }
 }
 
 function assertExportManifestIsPublic(manifest, jobId) {
@@ -448,6 +522,8 @@ async function main() {
   const baseline = await baselineContainers();
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "frame-full-stack-e2e-"));
   const videoPath = join(temporaryDirectory, "fixture.mp4");
+  const imagePaths = ["fixture.jpg", "fixture.png", "fixture.webp"].map((name) => join(temporaryDirectory, name));
+  const archivePath = join(temporaryDirectory, "fixture-images.zip");
   let cleaning = false;
   const emergencyCleanup = async (exitCode) => {
     if (cleaning) return;
@@ -481,8 +557,16 @@ async function main() {
     if (!/^[0-9a-f]{12,64}$/.test(worker.stdout)) throw new Error("Doğrulanmış worker container bulunamadı.");
     await docker(project, env, ["exec", "-T", "frame-worker", "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=12:duration=4", "-vf", "eq=brightness=0.10:saturation=1.15", "-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-y", "/tmp/e2e-fixture.mp4"], { timeoutMs: 60_000 });
     await run("docker", ["cp", `${worker.stdout}:/tmp/e2e-fixture.mp4`, videoPath], { timeoutMs: 30_000 });
+    for (const [index, extension] of ["jpg", "png", "webp"].entries()) {
+      await docker(project, env, ["exec", "-T", "frame-worker", "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `testsrc2=size=${320 + index * 40}x${180 + index * 20}:rate=1:duration=1`, "-frames:v", "1", "-threads", "1", "-y", `/tmp/e2e-image.${extension}`], { timeoutMs: 60_000 });
+      await run("docker", ["cp", `${worker.stdout}:/tmp/e2e-image.${extension}`, imagePaths[index]], { timeoutMs: 30_000 });
+    }
+    await run("python", ["-c", "import os,sys,zipfile;z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED);[z.write(p,'safe/'+os.path.basename(p)) for p in sys.argv[2:]];z.close()", archivePath, ...imagePaths], { timeoutMs: 30_000 });
     const result = await browserFlow(`http://${publicHost}:${frontendPort}`, videoPath);
     if (result.framesSaved !== 4) throw new Error(`Deterministik fixture tam 4 frame üretmedi: ${result.framesSaved}`);
+    const datasetSingle = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [imagePaths[0]], false, temporaryDirectory);
+    const datasetMultiple = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, imagePaths, false, temporaryDirectory);
+    const datasetZip = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [archivePath], true, temporaryDirectory);
     if (PRODUCTION_E2E) {
       const postgresBefore = (await docker(project, env, ["ps", "-q", "postgres"], { timeoutMs: 30_000 })).stdout;
       const minioBefore = (await docker(project, env, ["ps", "-q", "minio"], { timeoutMs: 30_000 })).stdout;
@@ -524,7 +608,7 @@ async function main() {
         throw new Error("Restart sonrası kalıcı manifest doğrulanamadı.");
       }
     }
-    console.log(`Full-stack E2E başarılı: durumlar=${result.statuses}; kare=${result.framesSaved}; container_recreation=${PRODUCTION_E2E ? "postgres,minio" : "none"}; süre=${((Date.now() - started) / 1000).toFixed(1)} sn.`);
+    console.log(`Full-stack E2E başarılı: durumlar=${result.statuses}; kare=${result.framesSaved}; dataset=single:${datasetSingle.images},multi:${datasetMultiple.images},zip:${datasetZip.images}; container_recreation=${PRODUCTION_E2E ? "postgres,minio" : "none"}; süre=${((Date.now() - started) / 1000).toFixed(1)} sn.`);
   } catch (error) {
     await diagnostics(project, env);
     throw error;

@@ -41,7 +41,7 @@ export function JobTracker({ jobId }: { jobId: string }) {
             <p>{copy.detail}</p>
             <dl className="job-details">
               <div><dt>Kaynak</dt><dd>{job.source}</dd></div>
-              <div><dt>Tür</dt><dd>{job.source_type === "UPLOAD" ? "Dosya yükleme" : "Video URL’si"}</dd></div>
+              <div><dt>Tür</dt><dd>{job.source_type === "IMAGE_DATASET" ? "Görsel veri seti" : job.source_type === "UPLOAD" ? "Dosya yükleme" : "Video URL’si"}</dd></div>
               <div><dt>Oluşturulma</dt><dd>{new Intl.DateTimeFormat("tr-TR", { dateStyle: "medium", timeStyle: "medium" }).format(new Date(job.created_at))}</dd></div>
             </dl>
             {job.status === "FAILED" && job.failure && (

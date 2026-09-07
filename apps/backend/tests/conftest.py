@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import os
 from collections.abc import Iterator
 
@@ -31,7 +32,13 @@ class FakeStorage:
         content = await file.read()
         self.uploads.append(object_key)
         return S3ObjectReference(
-            1, "test-bucket", object_key, None, '"etag"', len(content), "a" * 64
+            1,
+            "test-bucket",
+            object_key,
+            None,
+            '"etag"',
+            len(content),
+            hashlib.sha256(content).hexdigest(),
         )
 
     async def delete(self, reference: S3ObjectReference) -> None:

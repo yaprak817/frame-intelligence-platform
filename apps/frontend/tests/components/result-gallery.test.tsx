@@ -9,7 +9,7 @@ import { ResultGallery } from "@/components/results/result-gallery";
 
 const hash = "a".repeat(64);
 const jobId = "11111111-1111-4111-8111-111111111111";
-const job = (status: JobStatus, failure = status === "FAILED" ? { code: "INVALID_VIDEO", message: "private detail" } : null): JobStatusResponse => ({ id: jobId, status, source_type: "UPLOAD", source: "clip.mp4", created_at: "2026-08-24T10:00:00Z", started_at: null, completed_at: null, failure, result: status === "SUCCEEDED" ? { available: true, metadata_url: `/api/v1/jobs/${jobId}/result`, manifest_download_url: `/api/v1/jobs/${jobId}/result/manifest` } : null });
+const job = (status: JobStatus, failure = status === "FAILED" ? { code: "INVALID_VIDEO", message: "private detail" } : null): JobStatusResponse => ({ id: jobId, status, source_type: "UPLOAD", source: "clip.mp4", created_at: "2026-08-24T10:00:00Z", started_at: null, completed_at: null, failure, result: status === "SUCCEEDED" ? { result_kind: "VIDEO_FRAMES", available: true, metadata_url: `/api/v1/jobs/${jobId}/result`, manifest_download_url: `/api/v1/jobs/${jobId}/result/manifest` } : null });
 const manifest = (frames = 1): PublicResultManifest => ({ schema_version: 1, job_id: jobId, created_at: "2026-08-24T10:00:00Z", summary: { frames_saved: frames, candidates: 3, shortlisted: 2, duplicates_removed: 1, processing_seconds: 2, duration_seconds: 10 }, frames: Array.from({ length: frames }, (_, index) => ({ index, filename: `frame_${String(index).padStart(6, "0")}_${index * 1000}ms_640x480.jpg`, content_type: "image/jpeg", size_bytes: 10, sha256: hash, timestamp_ms: index * 1000, width: 640, height: 480, access_url: `/api/v1/jobs/${jobId}/result/frames/${index}/access` })) });
 
 describe("result gallery", () => {

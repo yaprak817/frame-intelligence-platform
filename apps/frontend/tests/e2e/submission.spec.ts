@@ -11,7 +11,7 @@ test("submits a URL through same-origin API and reaches success", async ({ page 
   await page.route("**/api/v1/jobs/11111111-1111-4111-8111-111111111111", async (route) => {
     requests.push(route.request().url()); polls += 1;
     const status = polls === 1 ? "RUNNING" : "SUCCEEDED";
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", status, source_type: "URL", source: "https://example.com/video", created_at: "2026-08-24T10:00:00Z", started_at: null, completed_at: null, failure: null, result: status === "SUCCEEDED" ? { available: true, metadata_url: "/api/v1/jobs/1/result", manifest_download_url: "/api/v1/jobs/1/result/manifest" } : null }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", status, source_type: "URL", source: "https://example.com/video", created_at: "2026-08-24T10:00:00Z", started_at: null, completed_at: null, failure: null, result: status === "SUCCEEDED" ? { result_kind: "VIDEO_FRAMES", available: true, metadata_url: "/api/v1/jobs/1/result", manifest_download_url: "/api/v1/jobs/1/result/manifest" } : null }) });
   });
   await page.goto("/");
   const expectedOrigin = new URL(page.url()).origin;

@@ -113,12 +113,18 @@ class OutboxRepository:
             if event is None:
                 return False
             try:
-                if event.event_type != OutboxEventType.PROCESS_VIDEO_JOB:
+                if event.event_type not in {
+                    OutboxEventType.PROCESS_VIDEO_JOB,
+                    OutboxEventType.PROCESS_IMAGE_DATASET_JOB,
+                }:
                     raise InvalidOutboxPayloadError("Unsupported outbox event type")
                 job_id = parse_job_id(event.payload)
                 if job_id != event.aggregate_id:
                     raise InvalidOutboxPayloadError("Outbox aggregate mismatch")
-                await asyncio.to_thread(publisher.publish, job_id)
+                if event.event_type == OutboxEventType.PROCESS_IMAGE_DATASET_JOB:
+                    await asyncio.to_thread(publisher.publish_image_dataset, job_id)
+                else:
+                    await asyncio.to_thread(publisher.publish, job_id)
             except Exception as error:
                 event.attempt_count += 1
                 event.next_attempt_at = now + timedelta(

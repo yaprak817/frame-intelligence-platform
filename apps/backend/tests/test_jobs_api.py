@@ -233,6 +233,7 @@ def test_succeeded_job_returns_safe_result_descriptor(
 
     assert response.status_code == 200
     assert response.json()["result"] == {
+        "result_kind": "VIDEO_FRAMES",
         "available": True,
         "metadata_url": f"/api/v1/jobs/{job_id}/result",
         "manifest_download_url": f"/api/v1/jobs/{job_id}/result/manifest",

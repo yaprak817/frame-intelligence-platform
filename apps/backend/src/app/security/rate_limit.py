@@ -164,6 +164,16 @@ _RESULT_PATHS = (
         "GET",
         re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result/frames/[0-9]+/download$"),
     ),
+    (
+        "GET",
+        re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result/images/[0-9]+/preview$"),
+    ),
+    (
+        "GET",
+        re.compile(
+            r"^/api/v1/jobs/[0-9a-fA-F-]{36}/dataset-exports/(?:accepted|yolo)/download$"
+        ),
+    ),
     ("POST", re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/exports$")),
     (
         "GET",
@@ -175,7 +185,11 @@ _RESULT_PATHS = (
 
 
 def protected_group(method: str, path: str) -> tuple[str, str] | None:
-    if method == "POST" and path in {"/api/v1/jobs/upload", "/api/v1/jobs/url"}:
+    if method == "POST" and path in {
+        "/api/v1/jobs/upload",
+        "/api/v1/jobs/url",
+        "/api/v1/jobs/image-dataset",
+    }:
         return "submission", "rate_limit_submission_requests"
     if any(
         method == allowed and pattern.fullmatch(path)
@@ -230,7 +244,44 @@ class RateLimitMiddleware:
                 {"Retry-After": str(decision.retry_after)},
             )(scope, receive, send)
             return
+        if scope["method"] == "POST" and scope["path"] == "/api/v1/jobs/image-dataset":
+            maximum = settings.image_dataset_max_total_bytes + min(
+                16 * 1024 * 1024,
+                settings.image_dataset_max_files * 2048 + 1024 * 1024,
+            )
+            raw_length = Headers(scope=scope).get("content-length")
+            if raw_length is not None:
+                try:
+                    if int(raw_length) > maximum:
+                        await _error_response(
+                            413, "DATASET_TOO_LARGE", "Dataset upload is too large"
+                        )(scope, receive, send)
+                        return
+                except ValueError:
+                    pass
+            consumed = 0
+
+            async def bounded_receive():
+                nonlocal consumed
+                message = await receive()
+                if message["type"] == "http.request":
+                    consumed += len(message.get("body", b""))
+                    if consumed > maximum:
+                        raise DatasetRequestTooLarge
+                return message
+
+            try:
+                await self.app(scope, bounded_receive, send)
+            except DatasetRequestTooLarge:
+                await _error_response(
+                    413, "DATASET_TOO_LARGE", "Dataset upload is too large"
+                )(scope, receive, send)
+            return
         await self.app(scope, receive, send)
+
+
+class DatasetRequestTooLarge(RuntimeError):
+    pass
 
 
 def _error_response(

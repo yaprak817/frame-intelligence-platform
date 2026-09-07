@@ -1,3 +1,10 @@
+# ruff: noqa: E501
+import asyncio
+import hashlib
+import json
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -11,8 +18,11 @@ from app.schemas.artifacts import (
     FRAME_FILENAME_PATTERN,
     FrameAccessResponse,
     ManifestFrameV1,
+    PublicDatasetImage,
+    PublicDatasetManifest,
     PublicFrame,
     PublicResultManifest,
+    StoredDatasetManifestV1,
     StoredManifestV1,
 )
 from app.storage.s3 import (
@@ -22,7 +32,7 @@ from app.storage.s3 import (
     ResultObjectStorage,
 )
 
-MANIFEST_MAX_BYTES = 1024 * 1024
+MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 MANIFEST_CONTENT_TYPE = "application/json"
 FRAME_CONTENT_TYPE = "image/jpeg"
 
@@ -67,21 +77,38 @@ class ResultArtifactService:
         repository: JobRepository,
         storage: ResultObjectStorage,
         url_ttl_seconds: int,
+        dataset_image_max_bytes: int = 50 * 1024 * 1024,
+        dataset_export_max_bytes: int = 2 * 1024 * 1024 * 1024,
+        spool_min_free_bytes: int = 256 * 1024 * 1024,
+        spool_root: str | None = None,
     ) -> None:
         self._repository = repository
         self._storage = storage
         self._url_ttl_seconds = url_ttl_seconds
+        self._dataset_image_max_bytes = dataset_image_max_bytes
+        self._dataset_export_max_bytes = dataset_export_max_bytes
+        self._spool_min_free_bytes = spool_min_free_bytes
+        self._spool_root = spool_root
 
-    async def public_manifest(self, job_id: UUID) -> PublicResultManifest:
+    async def public_manifest(
+        self, job_id: UUID
+    ) -> PublicResultManifest | PublicDatasetManifest:
         _job, manifest = await self._load(job_id)
+        if isinstance(manifest, StoredDatasetManifestV1):
+            return _public_dataset_manifest(manifest)
         return _public_manifest(manifest)
 
     async def frame_access(self, job_id: UUID, frame_index: int) -> FrameAccessResponse:
         _job, manifest = await self._load(job_id)
-        if frame_index < 0 or frame_index >= len(manifest.frames):
+        frames = (
+            manifest.images
+            if isinstance(manifest, StoredDatasetManifestV1)
+            else manifest.frames
+        )
+        if frame_index < 0 or frame_index >= len(frames):
             raise ArtifactNotFoundError
-        frame = manifest.frames[frame_index]
-        if frame.index != frame_index:
+        frame = frames[frame_index]
+        if frame.index != frame_index or frame.object_key is None:
             raise ManifestInvalidError
         try:
             metadata = await self._storage.head(frame.object_key)
@@ -105,25 +132,66 @@ class ResultArtifactService:
         self, job_id: UUID, frame_index: int
     ) -> tuple[ObjectStream, str]:
         _job, manifest = await self._load(job_id)
-        if frame_index < 0 or frame_index >= len(manifest.frames):
+        frames = (
+            manifest.images
+            if isinstance(manifest, StoredDatasetManifestV1)
+            else manifest.frames
+        )
+        if frame_index < 0 or frame_index >= len(frames):
             raise ArtifactNotFoundError
-        frame = manifest.frames[frame_index]
+        frame = frames[frame_index]
+        if frame.object_key is None:
+            raise ArtifactNotFoundError
         metadata = await self._storage.head(frame.object_key)
         if (
             metadata.size_bytes != frame.size_bytes
             or metadata.content_type != frame.content_type
         ):
             raise ManifestInvalidError
-        filename = _download_filename(
-            frame.index, frame.timestamp_ms, frame.content_type
+        filename = (
+            frame.filename
+            if isinstance(manifest, StoredDatasetManifestV1)
+            else _download_filename(frame.index, frame.timestamp_ms, frame.content_type)
         )
-        stream = await self._storage.open_stream(frame.object_key)
-        if stream.metadata != metadata:
+        stream = (
+            await self._verified_stream(
+                frame.object_key,
+                frame.size_bytes,
+                frame.sha256,
+                frame.content_type,
+                self._dataset_image_max_bytes,
+            )
+            if isinstance(manifest, StoredDatasetManifestV1)
+            else await self._storage.open_stream(frame.object_key)
+        )
+        if (
+            not isinstance(manifest, StoredDatasetManifestV1)
+            and stream.metadata != metadata
+        ):
             stream.body.close()
             raise ManifestInvalidError
         return stream, filename
 
-    async def _load(self, job_id: UUID) -> tuple[ProcessingJob, StoredManifestV1]:
+    async def dataset_preview(self, job_id: UUID, image_index: int) -> ObjectStream:
+        _job, manifest = await self._load(job_id)
+        if not isinstance(manifest, StoredDatasetManifestV1):
+            raise ArtifactNotFoundError
+        if image_index < 0 or image_index >= len(manifest.images):
+            raise ArtifactNotFoundError
+        image = manifest.images[image_index]
+        if image.index != image_index or image.object_key is None:
+            raise ArtifactNotFoundError
+        return await self._verified_stream(
+            image.object_key,
+            image.size_bytes,
+            image.sha256,
+            image.content_type,
+            self._dataset_image_max_bytes,
+        )
+
+    async def _load(
+        self, job_id: UUID
+    ) -> tuple[ProcessingJob, StoredManifestV1 | StoredDatasetManifestV1]:
         job = await self._repository.get(job_id)
         if job is None:
             raise ResultJobNotFoundError
@@ -150,8 +218,115 @@ class ResultArtifactService:
             raise ManifestInvalidError from error
         if stored.metadata.content_type != MANIFEST_CONTENT_TYPE:
             raise ManifestInvalidError
-        manifest = validate_manifest(stored.payload, job.id, reference.run_token)
+        try:
+            raw = json.loads(stored.payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ManifestInvalidError from error
+        manifest = (
+            validate_dataset_manifest(stored.payload, job.id, reference.run_token)
+            if isinstance(raw, dict) and raw.get("dataset_type") == "image"
+            else validate_manifest(stored.payload, job.id, reference.run_token)
+        )
         return job, manifest
+
+    async def dataset_export(self, job_id: UUID, mode: str) -> tuple[ObjectStream, str]:
+        _job, manifest = await self._load(job_id)
+        if not isinstance(manifest, StoredDatasetManifestV1) or mode not in {
+            "accepted",
+            "yolo",
+        }:
+            raise ArtifactNotFoundError
+        export = manifest.exports.get(mode)
+        if export is None:
+            raise ArtifactNotFoundError
+        metadata = await self._storage.head(export.object_key)
+        if (
+            metadata.size_bytes != export.size_bytes
+            or metadata.content_type != "application/zip"
+            or metadata.sha256 != export.sha256
+        ):
+            raise ManifestInvalidError
+        stream = await self._verified_stream(
+            export.object_key,
+            export.size_bytes,
+            export.sha256,
+            "application/zip",
+            self._dataset_export_max_bytes,
+        )
+        return stream, f"image-dataset-{mode}.zip"
+
+    async def _verified_stream(
+        self,
+        object_key: str,
+        expected_size: int,
+        expected_sha256: str,
+        expected_content_type: str,
+        max_bytes: int,
+    ) -> ObjectStream:
+        if expected_size <= 0 or expected_size > max_bytes:
+            raise ManifestInvalidError
+        spool_root = self._spool_root or tempfile.gettempdir()
+        if shutil.disk_usage(spool_root).free < (
+            expected_size + self._spool_min_free_bytes
+        ):
+            raise ResultUnavailableError
+        source = await self._storage.open_stream(object_key)
+        descriptor, path = tempfile.mkstemp(
+            prefix="dataset-artifact-", suffix=".spool", dir=spool_root
+        )
+        digest = hashlib.sha256()
+        actual = 0
+        transferred = False
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                async for chunk in source.chunks():
+                    actual += len(chunk)
+                    if actual > expected_size or actual > max_bytes:
+                        raise ManifestInvalidError
+                    digest.update(chunk)
+                    await asyncio.to_thread(output.write, chunk)
+            if (
+                source.metadata.size_bytes != expected_size
+                or source.metadata.content_type != expected_content_type
+                or actual != expected_size
+                or digest.hexdigest() != expected_sha256
+            ):
+                raise ManifestInvalidError
+            stream = ObjectStream(
+                body=_DeletingFileBody(path),
+                metadata=source.metadata,
+            )
+            transferred = True
+            return stream
+        finally:
+            if not transferred:
+                source.body.close()
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+
+
+class _DeletingFileBody:
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._stream = open(path, "rb")
+
+    def read(self, size: int = -1) -> bytes:
+        return self._stream.read(size)
+
+    def close(self) -> None:
+        try:
+            self._stream.close()
+        finally:
+            try:
+                os.unlink(self._path)
+            except FileNotFoundError:
+                pass
 
 
 def _download_filename(index: int, timestamp_ms: int, content_type: str) -> str:
@@ -224,6 +399,38 @@ def validate_manifest(
     return manifest
 
 
+def validate_dataset_manifest(
+    payload: bytes, job_id: UUID, run_token: UUID
+) -> StoredDatasetManifestV1:
+    try:
+        manifest = StoredDatasetManifestV1.model_validate_json(payload)
+    except ValidationError as error:
+        raise ManifestInvalidError from error
+    if manifest.job_id != job_id or manifest.run_token != run_token:
+        raise ManifestInvalidError
+    prefix = f"jobs/{job_id}/results/{run_token}/"
+    if set(manifest.exports) != {"accepted", "yolo"}:
+        raise ManifestInvalidError
+    for mode, export in manifest.exports.items():
+        if (
+            export.object_key != f"{prefix}exports/{mode}.zip"
+            or "\\" in export.object_key
+        ):
+            raise ManifestInvalidError
+    for expected, image in enumerate(manifest.images):
+        if image.index != expected:
+            raise ManifestInvalidError
+        unusable = image.quality_category == "unusable"
+        expected_key = f"{prefix}images/{image.filename}"
+        expected_yolo = f"{prefix}yolo/{image.filename}"
+        if unusable:
+            if image.object_key is not None or image.yolo_object_key is not None:
+                raise ManifestInvalidError
+        elif image.object_key != expected_key or image.yolo_object_key != expected_yolo:
+            raise ManifestInvalidError
+    return manifest
+
+
 def _validate_frame(
     frame: ManifestFrameV1, expected_index: int, expected_prefix: tuple[str, ...]
 ) -> None:
@@ -267,4 +474,49 @@ def _public_manifest(manifest: StoredManifestV1) -> PublicResultManifest:
         created_at=manifest.created_at,
         summary=manifest.summary,
         frames=frames,
+    )
+
+
+def _public_dataset_manifest(
+    manifest: StoredDatasetManifestV1,
+) -> PublicDatasetManifest:
+    images = [
+        PublicDatasetImage(
+            index=image.index,
+            filename=image.filename,
+            content_type=image.content_type,
+            size_bytes=image.size_bytes,
+            sha256=image.sha256,
+            width=image.width,
+            height=image.height,
+            quality_category=image.quality_category,
+            sharpness=image.sharpness,
+            brightness=image.brightness,
+            underexposed_ratio=image.underexposed_ratio,
+            overexposed_ratio=image.overexposed_ratio,
+            resolution_usable=image.resolution_usable,
+            duplicate=image.duplicate,
+            access_url=(
+                f"/api/v1/jobs/{manifest.job_id}/result/images/{image.index}/preview"
+                if image.object_key
+                else None
+            ),
+            download_url=(
+                f"/api/v1/jobs/{manifest.job_id}/result/frames/{image.index}/download"
+                if image.object_key
+                else None
+            ),
+        )
+        for image in manifest.images
+    ]
+    return PublicDatasetManifest(
+        schema_version=manifest.schema_version,
+        dataset_type=manifest.dataset_type,
+        job_id=manifest.job_id,
+        created_at=manifest.created_at,
+        summary=manifest.summary,
+        recommended_indices=manifest.recommended_indices,
+        images=images,
+        accepted_download_url=f"/api/v1/jobs/{manifest.job_id}/dataset-exports/accepted/download",
+        yolo_download_url=f"/api/v1/jobs/{manifest.job_id}/dataset-exports/yolo/download",
     )

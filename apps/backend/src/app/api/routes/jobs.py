@@ -27,7 +27,11 @@ from app.api.dependencies import (
 )
 from app.domain.jobs import JobStatus, SourceType
 from app.models.processing_job import ProcessingJob
-from app.schemas.artifacts import FrameAccessResponse, PublicResultManifest
+from app.schemas.artifacts import (
+    FrameAccessResponse,
+    PublicDatasetManifest,
+    PublicResultManifest,
+)
 from app.schemas.exports import (
     CreateFrameExportRequest,
     ExportStatus,
@@ -171,6 +175,68 @@ async def create_upload_job(
     )
 
 
+@router.post(
+    "/image-dataset",
+    response_model=JobSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_image_dataset_job(
+    response: Response,
+    service: JobServiceDependency,
+    files: Annotated[list[UploadFile] | None, File()] = None,
+    archive: Annotated[UploadFile | None, File()] = None,
+    idempotency_key_header: Annotated[
+        str | None, Header(alias="Idempotency-Key")
+    ] = None,
+) -> JobSubmissionResponse:
+    key = _idempotency_key(idempotency_key_header)
+    selected = list(files or [])
+    archive_mode = archive is not None
+    if archive_mode:
+        if selected:
+            raise HTTPException(
+                status_code=422,
+                detail="Image files and ZIP archive cannot be mixed",
+            )
+        selected = [archive]
+    if not selected:
+        raise HTTPException(status_code=422, detail="Select images or one ZIP archive")
+    try:
+        job, _created = await service.create_image_dataset_job(
+            selected,
+            [
+                item.filename or ("dataset.zip" if archive_mode else "image")
+                for item in selected
+            ],
+            [item.content_type or "application/octet-stream" for item in selected],
+            [item.size for item in selected],
+            archive=archive_mode,
+            idempotency_key=key,
+        )
+    except UnsupportedUploadError as error:
+        raise HTTPException(status_code=415, detail=str(error)) from error
+    except UploadTooLargeError as error:
+        raise HTTPException(
+            status_code=413, detail="Dataset upload is too large"
+        ) from error
+    except ObjectStorageError as error:
+        raise HTTPException(
+            status_code=503, detail="Object storage is unavailable"
+        ) from error
+    except IdempotencyConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency-Key was already used for a different request",
+        ) from error
+    status_url = f"/api/v1/jobs/{job.id}"
+    response.headers["Location"] = status_url
+    return JobSubmissionResponse(
+        job_id=job.id,
+        status=JobStatus(job.status),
+        status_url=status_url,
+    )
+
+
 @router.get("/{job_id}", response_model=JobStatusResponse)
 async def get_job(
     job_id: str,
@@ -195,6 +261,11 @@ def _status_response(job: ProcessingJob) -> JobStatusResponse:
     if JobStatus(job.status) is JobStatus.SUCCEEDED:
         base_url = f"/api/v1/jobs/{job.id}/result"
         result = JobResultDescriptor(
+            result_kind=(
+                "IMAGE_DATASET"
+                if SourceType(job.source_type) is SourceType.IMAGE_DATASET
+                else "VIDEO_FRAMES"
+            ),
             available=True,
             metadata_url=base_url,
             manifest_download_url=f"{base_url}/manifest",
@@ -214,13 +285,13 @@ def _status_response(job: ProcessingJob) -> JobStatusResponse:
 
 @router.get(
     "/{job_id}/result",
-    response_model=PublicResultManifest,
+    response_model=PublicResultManifest | PublicDatasetManifest,
 )
 async def get_job_result(
     job_id: str,
     service: ResultServiceDependency,
     _authorization: ResultAuthorizationDependency,
-) -> PublicResultManifest:
+) -> PublicResultManifest | PublicDatasetManifest:
     parsed_id = _result_job_id(job_id)
     try:
         return await service.public_manifest(parsed_id)
@@ -268,6 +339,53 @@ async def download_frame(
     return StreamingResponse(
         stream.chunks(),
         media_type=stream.metadata.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(stream.metadata.size_bytes),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/{job_id}/result/images/{image_index}/preview")
+async def preview_dataset_image(
+    job_id: str,
+    image_index: Annotated[int, Path(ge=0)],
+    service: ResultServiceDependency,
+    _authorization: ResultAuthorizationDependency,
+) -> StreamingResponse:
+    try:
+        stream = await service.dataset_preview(_result_job_id(job_id), image_index)
+    except Exception as error:
+        _raise_result_error(error)
+        raise
+    return StreamingResponse(
+        stream.chunks(),
+        media_type="image/jpeg",
+        headers={
+            "Content-Length": str(stream.metadata.size_bytes),
+            "Content-Disposition": f'inline; filename="image-{image_index:06d}.jpg"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/{job_id}/dataset-exports/{mode}/download")
+async def download_dataset_export(
+    job_id: str,
+    mode: str,
+    service: ResultServiceDependency,
+    _authorization: ResultAuthorizationDependency,
+) -> StreamingResponse:
+    try:
+        stream, filename = await service.dataset_export(_result_job_id(job_id), mode)
+    except Exception as error:
+        _raise_result_error(error)
+        raise
+    return StreamingResponse(
+        stream.chunks(),
+        media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(stream.metadata.size_bytes),

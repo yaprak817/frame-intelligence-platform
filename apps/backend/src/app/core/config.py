@@ -45,11 +45,18 @@ class Settings(BaseSettings):
     object_storage_region: str = "us-east-1"
     object_storage_addressing_style: str = "path"
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024
+    image_dataset_max_files: int = 1000
+    image_dataset_max_file_bytes: int = 50 * 1024 * 1024
+    image_dataset_max_total_bytes: int = 2 * 1024 * 1024 * 1024
+    image_dataset_zip_max_compressed_bytes: int = 2 * 1024 * 1024 * 1024
+    result_artifact_spool_min_free_bytes: int = 256 * 1024 * 1024
     object_storage_multipart_chunk_bytes: int = 8 * 1024 * 1024
     result_artifact_url_ttl_seconds: int = 300
     frame_export_max_frames: int = 1000
     frame_export_max_total_bytes: int = 2 * 1024 * 1024 * 1024
     celery_broker_url: str = "redis://localhost:6379/0"
+    celery_task_queue: str = "video-processing"
+    celery_redis_keyprefix: str = ""
     redis_url: str | None = None
     cors_allow_origins: list[str] = Field(default_factory=list)
     cors_allow_credentials: bool = False
@@ -140,6 +147,22 @@ class Settings(BaseSettings):
             raise ValueError("OBJECT_STORAGE_ADDRESSING_STYLE must be path or virtual")
         if self.max_upload_bytes <= 0:
             raise ValueError("MAX_UPLOAD_BYTES must be greater than zero")
+        if not 1 <= self.image_dataset_max_files <= 10_000:
+            raise ValueError("IMAGE_DATASET_MAX_FILES must be between 1 and 10000")
+        if self.image_dataset_max_file_bytes <= 0:
+            raise ValueError("IMAGE_DATASET_MAX_FILE_BYTES must be greater than zero")
+        if self.image_dataset_max_total_bytes < self.image_dataset_max_file_bytes:
+            raise ValueError(
+                "IMAGE_DATASET_MAX_TOTAL_BYTES must cover one maximum-sized file"
+            )
+        if self.image_dataset_zip_max_compressed_bytes <= 0:
+            raise ValueError(
+                "IMAGE_DATASET_ZIP_MAX_COMPRESSED_BYTES must be greater than zero"
+            )
+        if self.result_artifact_spool_min_free_bytes < 0:
+            raise ValueError(
+                "RESULT_ARTIFACT_SPOOL_MIN_FREE_BYTES must not be negative"
+            )
         if self.object_storage_multipart_chunk_bytes < 5 * 1024 * 1024:
             raise ValueError(
                 "OBJECT_STORAGE_MULTIPART_CHUNK_BYTES must be at least 5 MiB"

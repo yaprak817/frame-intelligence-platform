@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -70,6 +70,7 @@ class JobFailureResponse(BaseModel):
 
 
 class JobResultDescriptor(BaseModel):
+    result_kind: Literal["VIDEO_FRAMES", "IMAGE_DATASET"]
     available: bool
     metadata_url: str
     manifest_download_url: str
