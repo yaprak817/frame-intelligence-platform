@@ -245,6 +245,10 @@ class ProcessIdentity(NamedTuple):
     created: str
 
 
+def _same_process(left: ProcessIdentity, right: ProcessIdentity) -> bool:
+    return left.pid == right.pid and left.created == right.created
+
+
 def _process_snapshot() -> dict[int, ProcessIdentity]:
     if sys.platform == "win32":
         command = (
@@ -265,9 +269,12 @@ def _process_snapshot() -> dict[int, ProcessIdentity]:
             if not entry.name.isdigit():
                 continue
             try:
-                fields = (entry / "stat").read_text(encoding="ascii").split()
-                rows.append(f"{entry.name}|{fields[3]}|{fields[21]}")
-            except (FileNotFoundError, PermissionError, IndexError):
+                stat = (entry / "stat").read_text(encoding="ascii")
+                fields = stat[stat.rindex(") ") + 2 :].split()
+                if fields[0] == "Z":
+                    continue
+                rows.append(f"{entry.name}|{fields[1]}|{fields[19]}")
+            except (FileNotFoundError, PermissionError, IndexError, ValueError):
                 continue
     snapshot: dict[int, ProcessIdentity] = {}
     for row in rows:
@@ -281,8 +288,26 @@ def _process_snapshot() -> dict[int, ProcessIdentity]:
 
 
 class ProcessRegistry:
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        windows: bool | None = None,
+        windows_control_event: int | None = None,
+        signal_sender: Callable[[int, int], None] = os.kill,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.path = path
+        self._windows = sys.platform == "win32" if windows is None else windows
+        self._windows_control_event = (
+            getattr(signal, "CTRL_BREAK_EVENT", None)
+            if windows is None and self._windows
+            else windows_control_event
+        )
+        self._signal_sender = signal_sender
+        self._monotonic = monotonic
+        self._sleep = sleep
         self._owned: dict[int, ProcessIdentity] = {}
         self._roots: set[int] = set()
         self._lock = threading.Lock()
@@ -310,7 +335,7 @@ class ProcessRegistry:
         snapshot = _process_snapshot()
         with self._lock:
             for pid, identity in self._owned.items():
-                if pid in snapshot and snapshot[pid] != identity:
+                if pid in snapshot and not _same_process(snapshot[pid], identity):
                     raise RuntimeError("Process ownership mismatch")
             owned = set(self._roots) | set(self._owned)
             changed = True
@@ -347,7 +372,8 @@ class ProcessRegistry:
         mismatched = [
             identity
             for identity in self._owned.values()
-            if identity.pid in snapshot and snapshot[identity.pid] != identity
+            if identity.pid in snapshot
+            and not _same_process(snapshot[identity.pid], identity)
         ]
         if mismatched:
             raise RuntimeError("Process ownership mismatch")
@@ -372,31 +398,31 @@ class ProcessRegistry:
         )
         graceful = (
             [identity for identity in live if identity.pid in self._roots]
-            if sys.platform == "win32"
+            if self._windows
             else live
         )
         for identity in graceful:
+            graceful_signal = (
+                self._windows_control_event if self._windows else signal.SIGTERM
+            )
+            if graceful_signal is None:
+                continue
             try:
-                os.kill(
-                    identity.pid,
-                    signal.CTRL_BREAK_EVENT
-                    if sys.platform == "win32"
-                    else signal.SIGTERM,
-                )
+                self._signal_sender(identity.pid, graceful_signal)
             except OSError:
                 continue
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and self._matching_live():
-            time.sleep(0.05)
-        force_signal = signal.SIGTERM if sys.platform == "win32" else signal.SIGKILL
+        deadline = self._monotonic() + 10
+        while self._monotonic() < deadline and self._matching_live():
+            self._sleep(0.05)
+        force_signal = signal.SIGTERM if self._windows else signal.SIGKILL
         for identity in self._matching_live():
             try:
-                os.kill(identity.pid, force_signal)
+                self._signal_sender(identity.pid, force_signal)
             except ProcessLookupError:
                 continue
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and self._matching_live():
-            time.sleep(0.05)
+        deadline = self._monotonic() + 5
+        while self._monotonic() < deadline and self._matching_live():
+            self._sleep(0.05)
         if self._matching_live():
             raise RuntimeError("Owned process remained alive")
 
@@ -413,7 +439,11 @@ def _stop(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
     if sys.platform == "win32":
-        process.send_signal(signal.CTRL_BREAK_EVENT)
+        control_event = getattr(signal, "CTRL_BREAK_EVENT", None)
+        if control_event is None:
+            process.kill()
+        else:
+            process.send_signal(control_event)
     else:
         process.terminate()
     try:
