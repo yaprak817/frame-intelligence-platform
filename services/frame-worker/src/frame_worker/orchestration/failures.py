@@ -2,9 +2,11 @@ from dataclasses import dataclass
 
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy.exc import OperationalError
 
 from frame_worker.artifacts.object_storage import ArtifactStorageError
+from frame_worker.datasets.processor import DatasetCleanupError, DatasetError
 from frame_worker.ingestion.errors import (
     InvalidVideoSourceError,
     UnsafeVideoURLError,
@@ -30,13 +32,24 @@ SAFE_MESSAGES = {
     "DOWNLOAD_FAILED": "The video could not be downloaded.",
     "STORAGE_UNAVAILABLE": "Object storage is temporarily unavailable.",
     "PROCESSING_FAILED": "Video processing failed.",
+    "INVALID_DATASET": "The image dataset is invalid.",
+    "DATASET_TIMEOUT": "The image dataset processing timed out.",
 }
 
 
 def classify_failure(error: BaseException, source_type: str) -> Failure:
+    if isinstance(error, DatasetCleanupError):
+        code = "STORAGE_UNAVAILABLE"
+        return Failure(code, SAFE_MESSAGES[code], True)
     if isinstance(error, ArtifactStorageError):
         code = "STORAGE_UNAVAILABLE"
         return Failure(code, SAFE_MESSAGES[code], True)
+    if isinstance(error, SoftTimeLimitExceeded) and source_type == "IMAGE_DATASET":
+        code = "DATASET_TIMEOUT"
+        return Failure(code, SAFE_MESSAGES[code], True)
+    if isinstance(error, DatasetError):
+        code = "INVALID_DATASET"
+        return Failure(code, SAFE_MESSAGES[code], False)
     if isinstance(error, UnsafeVideoURLError):
         code = "UNSAFE_URL"
     elif isinstance(error, UnsupportedVideoSourceError):

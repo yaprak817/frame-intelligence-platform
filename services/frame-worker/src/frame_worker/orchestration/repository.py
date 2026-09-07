@@ -81,6 +81,7 @@ class JobRepository:
                         processing_jobs.c.status,
                         processing_jobs.c.version,
                         processing_jobs.c.lease_expires_at,
+                        processing_jobs.c.run_token,
                     ).where(processing_jobs.c.id == job_id)
                 )
                 .mappings()
@@ -125,7 +126,10 @@ class JobRepository:
                 .returning(*_record_columns())
             )
             row = connection.execute(statement).mappings().one_or_none()
-            return ClaimResult(_record(row) if row else None)
+            return ClaimResult(
+                _record(row) if row else None,
+                stale_run_token=current["run_token"] if stale and row else None,
+            )
 
     def heartbeat(self, job_id: UUID, run_token: UUID, lease_seconds: float) -> bool:
         with self._engine.begin() as connection:

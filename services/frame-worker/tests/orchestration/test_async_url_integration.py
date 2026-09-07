@@ -10,6 +10,10 @@ import psycopg
 import pytest
 from celery.contrib.testing.worker import start_worker
 
+os.environ.setdefault(
+    "JOB_SOURCE_ENCRYPTION_KEY", "VFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQ="
+)
+
 from frame_worker.artifacts.object_storage import (
     ArtifactStorageError,
     ObjectStorageArtifactStore,
@@ -187,7 +191,7 @@ def test_real_publisher_redis_celery_url_job_succeeds(monkeypatch, tmp_path) -> 
     with start_worker(
         celery_app,
         pool="solo",
-        queues=("video-processing",),
+        queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
         response = httpx.post(
@@ -270,7 +274,7 @@ def test_real_publisher_redis_celery_upload_job_succeeds(monkeypatch) -> None:
     with start_worker(
         celery_app,
         pool="solo",
-        queues=("video-processing",),
+        queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
         response = httpx.post(
@@ -352,7 +356,7 @@ def test_duplicate_real_redis_deliveries_are_safe_no_ops(monkeypatch, tmp_path) 
     with start_worker(
         celery_app,
         pool="solo",
-        queues=("video-processing",),
+        queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
         response = httpx.post(
@@ -388,7 +392,7 @@ def test_duplicate_real_redis_deliveries_are_safe_no_ops(monkeypatch, tmp_path) 
             celery_app.send_task(
                 "frame_worker.process_video",
                 kwargs={"job_id": str(job_id)},
-                queue="video-processing",
+                queue=settings.task_queue,
             )
         time.sleep(2)
         with psycopg.connect(psycopg_url) as connection:
@@ -436,7 +440,7 @@ def test_real_celery_retry_exhaustion_fails_without_stranding(
     with start_worker(
         celery_app,
         pool="solo",
-        queues=("video-processing",),
+        queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
         response = httpx.post(
@@ -509,7 +513,7 @@ def test_storage_outage_recovers_on_new_run(monkeypatch, tmp_path) -> None:
     with start_worker(
         celery_app,
         pool="solo",
-        queues=("video-processing",),
+        queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
         response = httpx.post(

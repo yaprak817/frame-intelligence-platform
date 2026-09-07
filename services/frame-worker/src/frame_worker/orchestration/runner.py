@@ -12,6 +12,7 @@ from frame_worker.artifacts.object_storage import (
     ObjectStorageArtifactStore,
     PersistedArtifacts,
 )
+from frame_worker.datasets.processor import cleanup_stale_run, process_dataset
 from frame_worker.ingestion.adapters.direct_http import DirectHTTPVideoAdapter
 from frame_worker.ingestion.adapters.yt_dlp import YtDlpURLAdapter
 from frame_worker.ingestion.config import IngestionConfig
@@ -89,6 +90,44 @@ class JobRunner:
         persisted: PersistedArtifacts | None = None
         artifact_store: ObjectStorageArtifactStore | None = None
         try:
+            if job.source_type == SourceType.IMAGE_DATASET:
+                if claim.stale_run_token is not None:
+                    cleanup_stale_run(
+                        self.settings,
+                        job.id,
+                        claim.stale_run_token,
+                        job.run_token,
+                    )
+                with LeaseHeartbeat(
+                    self.repository_factory,
+                    job.id,
+                    job.run_token,
+                    self.settings.lease_seconds,
+                    self.settings.heartbeat_interval_seconds,
+                ) as heartbeat:
+                    with tempfile.TemporaryDirectory(
+                        prefix=f"image-dataset-{job.id}-",
+                        dir=self.settings.processing_temp_root,
+                    ) as workspace:
+                        output = process_dataset(job, Path(workspace), self.settings)
+                        persisted = output.persisted
+                        artifact_store = self.artifact_store_factory()
+                        if heartbeat.ownership_lost:
+                            raise OwnershipLostError
+                        if not self.repository.succeed(
+                            job.id,
+                            job.run_token,
+                            output.summary,
+                            persisted.result_reference,
+                        ):
+                            raise OwnershipLostError
+                logger.info(
+                    "Dataset job transition job_id=%s attempt=%s "
+                    "transition=RUNNING_TO_SUCCEEDED",
+                    job.id,
+                    job.attempt_count,
+                )
+                return True
             config = processing_config(job.processing_config)
             source = self._source(job)
             processor = self.processor_factory(config)

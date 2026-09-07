@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 import base64
 import binascii
 import os
@@ -47,6 +48,8 @@ class WorkerSettings:
     visibility_timeout_seconds: int
     worker_concurrency: int
     processing_temp_root: Path | None
+    task_queue: str = "video-processing"
+    redis_keyprefix: str = ""
     export_lease_seconds: float = 300
     export_heartbeat_interval_seconds: float = 30
     export_soft_time_limit_seconds: int = 1800
@@ -59,6 +62,48 @@ class WorkerSettings:
     export_max_temp_bytes: int = 2_200_000_000
     export_min_temp_free_bytes: int = 256 * 1024 * 1024
     export_stale_temp_seconds: int = 7200
+    dataset_max_images: int = 1000
+    dataset_max_file_bytes: int = 50 * 1024 * 1024
+    dataset_max_total_bytes: int = 2 * 1024 * 1024 * 1024
+    dataset_max_pixels: int = 100_000_000
+    dataset_min_pixels: int = 1024
+    dataset_zip_max_entries: int = 1200
+    dataset_zip_max_compressed_bytes: int = 2 * 1024 * 1024 * 1024
+    dataset_zip_max_entry_compressed_bytes: int = 50 * 1024 * 1024
+    dataset_zip_max_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
+    dataset_zip_max_ratio: float = 100.0
+    dataset_export_max_bytes: int = 2 * 1024 * 1024 * 1024
+    dataset_normal_sharpness: float = 100.0
+    dataset_unusable_sharpness: float = 5.0
+    dataset_min_brightness: float = 35.0
+    dataset_max_brightness: float = 225.0
+    dataset_unusable_brightness: float = 5.0
+    dataset_soft_time_limit_seconds: int = 1800
+    dataset_hard_time_limit_seconds: int = 1860
+    dataset_max_temp_bytes: int = 4_400_000_000
+    dataset_min_temp_free_bytes: int = 268_435_456
+
+    def __post_init__(self) -> None:
+        if self.dataset_max_total_bytes < self.dataset_max_file_bytes:
+            raise ValueError("Dataset total limit must cover one file")
+        if self.dataset_min_pixels >= self.dataset_max_pixels:
+            raise ValueError("Dataset pixel limits are inconsistent")
+        if self.dataset_zip_max_entries < self.dataset_max_images:
+            raise ValueError("ZIP entry limit must cover the image limit")
+        if self.dataset_zip_max_uncompressed_bytes < self.dataset_max_file_bytes:
+            raise ValueError("ZIP total limit must cover one file")
+        if not (
+            self.dataset_unusable_sharpness < self.dataset_normal_sharpness
+            and self.dataset_unusable_brightness
+            < self.dataset_min_brightness
+            < self.dataset_max_brightness
+            < 255
+        ):
+            raise ValueError("Dataset quality thresholds are inconsistent")
+        if self.dataset_hard_time_limit_seconds <= self.dataset_soft_time_limit_seconds:
+            raise ValueError("Dataset hard time limit must exceed soft time limit")
+        if self.dataset_max_temp_bytes < self.dataset_max_total_bytes:
+            raise ValueError("Dataset temp limit must cover source bytes")
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
@@ -114,6 +159,8 @@ class WorkerSettings:
                 "CELERY_VISIBILITY_TIMEOUT_SECONDS", "7200"
             ),
             worker_concurrency=_positive_int("CELERY_WORKER_CONCURRENCY", "1"),
+            task_queue=os.environ.get("CELERY_TASK_QUEUE", "video-processing"),
+            redis_keyprefix=os.environ.get("CELERY_REDIS_KEYPREFIX", ""),
             processing_temp_root=Path(temp_root).resolve() if temp_root else None,
             export_lease_seconds=export_lease,
             export_heartbeat_interval_seconds=export_heartbeat,
@@ -140,5 +187,57 @@ class WorkerSettings:
             ),
             export_stale_temp_seconds=_positive_int(
                 "FRAME_EXPORT_STALE_TEMP_SECONDS", "7200"
+            ),
+            dataset_max_images=_positive_int("IMAGE_DATASET_MAX_IMAGES", "1000"),
+            dataset_max_file_bytes=_positive_int(
+                "IMAGE_DATASET_MAX_FILE_BYTES", "52428800"
+            ),
+            dataset_max_total_bytes=_positive_int(
+                "IMAGE_DATASET_MAX_TOTAL_BYTES", "2147483648"
+            ),
+            dataset_max_pixels=_positive_int("IMAGE_DATASET_MAX_PIXELS", "100000000"),
+            dataset_min_pixels=_positive_int("IMAGE_DATASET_MIN_PIXELS", "1024"),
+            dataset_zip_max_entries=_positive_int(
+                "IMAGE_DATASET_ZIP_MAX_ENTRIES", "1200"
+            ),
+            dataset_zip_max_compressed_bytes=_positive_int(
+                "IMAGE_DATASET_ZIP_MAX_COMPRESSED_BYTES", "2147483648"
+            ),
+            dataset_zip_max_entry_compressed_bytes=_positive_int(
+                "IMAGE_DATASET_ZIP_MAX_ENTRY_COMPRESSED_BYTES", "52428800"
+            ),
+            dataset_zip_max_uncompressed_bytes=_positive_int(
+                "IMAGE_DATASET_ZIP_MAX_UNCOMPRESSED_BYTES", "2147483648"
+            ),
+            dataset_zip_max_ratio=_positive_float("IMAGE_DATASET_ZIP_MAX_RATIO", "100"),
+            dataset_export_max_bytes=_positive_int(
+                "IMAGE_DATASET_EXPORT_MAX_BYTES", "2147483648"
+            ),
+            dataset_normal_sharpness=_positive_float(
+                "IMAGE_DATASET_NORMAL_SHARPNESS", "100"
+            ),
+            dataset_unusable_sharpness=_positive_float(
+                "IMAGE_DATASET_UNUSABLE_SHARPNESS", "5"
+            ),
+            dataset_min_brightness=_positive_float(
+                "IMAGE_DATASET_MIN_BRIGHTNESS", "35"
+            ),
+            dataset_max_brightness=_positive_float(
+                "IMAGE_DATASET_MAX_BRIGHTNESS", "225"
+            ),
+            dataset_unusable_brightness=_positive_float(
+                "IMAGE_DATASET_UNUSABLE_BRIGHTNESS", "5"
+            ),
+            dataset_soft_time_limit_seconds=_positive_int(
+                "IMAGE_DATASET_SOFT_TIME_LIMIT_SECONDS", "1800"
+            ),
+            dataset_hard_time_limit_seconds=_positive_int(
+                "IMAGE_DATASET_HARD_TIME_LIMIT_SECONDS", "1860"
+            ),
+            dataset_max_temp_bytes=_positive_int(
+                "IMAGE_DATASET_MAX_TEMP_BYTES", "4400000000"
+            ),
+            dataset_min_temp_free_bytes=_positive_int(
+                "IMAGE_DATASET_MIN_TEMP_FREE_BYTES", "268435456"
             ),
         )

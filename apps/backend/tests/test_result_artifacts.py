@@ -1,4 +1,6 @@
+import asyncio
 import hashlib
+import io
 import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -12,6 +14,7 @@ from app.services.result_artifacts import (
     MANIFEST_MAX_BYTES,
     ManifestInvalidError,
     ResultArtifactService,
+    ResultUnavailableError,
     parse_result_reference,
     validate_manifest,
 )
@@ -20,10 +23,83 @@ from app.storage.s3 import (
     ObjectMetadata,
     ObjectNotFoundError,
     ObjectStorageError,
+    ObjectStream,
     ObjectTooLargeError,
     PresignedObject,
     S3ResultObjectStorage,
 )
+
+
+class DirectStreamStorage:
+    bucket = "frame-intelligence"
+
+    def __init__(self, body) -> None:
+        self.body = body
+
+    async def open_stream(self, _object_key: str) -> ObjectStream:
+        return ObjectStream(self.body, ObjectMetadata(4, "image/jpeg"))
+
+
+def test_verified_spool_rejects_low_disk_before_open(monkeypatch, tmp_path) -> None:
+    storage = DirectStreamStorage(io.BytesIO(b"data"))
+    opened = False
+
+    async def open_stream(_key):
+        nonlocal opened
+        opened = True
+        return await DirectStreamStorage.open_stream(storage, _key)
+
+    storage.open_stream = open_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "app.services.result_artifacts.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": 7})(),
+    )
+    service = ResultArtifactService(None, storage, 300, 10, 10, 4, str(tmp_path))  # type: ignore[arg-type]
+    with pytest.raises(ResultUnavailableError):
+        asyncio.run(
+            service._verified_stream(
+                "key", 4, hashlib.sha256(b"data").hexdigest(), "image/jpeg", 10
+            )
+        )
+    assert not opened
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("payload", [b"fail", b"dat", b"datax"])
+def test_verified_spool_rejects_hash_and_size_mismatch_and_cleans(
+    tmp_path, payload
+) -> None:
+    body = io.BytesIO(payload)
+    service = ResultArtifactService(
+        None, DirectStreamStorage(body), 300, 10, 10, 0, str(tmp_path)
+    )  # type: ignore[arg-type]
+    with pytest.raises(ManifestInvalidError):
+        asyncio.run(
+            service._verified_stream(
+                "key", 4, hashlib.sha256(b"data").hexdigest(), "image/jpeg", 10
+            )
+        )
+    assert body.closed
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_verified_spool_cancellation_closes_body_and_removes_file(tmp_path) -> None:
+    class CancelBody(io.BytesIO):
+        def read(self, _size=-1):
+            raise asyncio.CancelledError
+
+    body = CancelBody(b"data")
+    service = ResultArtifactService(
+        None, DirectStreamStorage(body), 300, 10, 10, 0, str(tmp_path)
+    )  # type: ignore[arg-type]
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            service._verified_stream(
+                "key", 4, hashlib.sha256(b"data").hexdigest(), "image/jpeg", 10
+            )
+        )
+    assert body.closed
+    assert list(tmp_path.iterdir()) == []
 
 
 class FakeResultStorage:

@@ -8,6 +8,7 @@ import type {
   PublicResultManifest,
   FrameAccessResponse,
   FrameExportResponse,
+  PublicDatasetManifest,
 } from "./types";
 
 const STATUSES: JobStatus[] = [
@@ -66,14 +67,15 @@ export function isJobStatus(value: unknown): value is JobStatusResponse {
   const result = item.result;
   const validResult =
     result === null ||
-    (isRecord(result) && exactKeys(result, ["available", "metadata_url", "manifest_download_url"]) &&
+    (isRecord(result) && exactKeys(result, ["result_kind", "available", "metadata_url", "manifest_download_url"]) &&
+      ((result as Record<string, unknown>).result_kind === "VIDEO_FRAMES" || (result as Record<string, unknown>).result_kind === "IMAGE_DATASET") &&
       typeof (result as Record<string, unknown>).available === "boolean" &&
       typeof (result as Record<string, unknown>).metadata_url === "string" &&
       typeof (result as Record<string, unknown>).manifest_download_url === "string");
   return (
     typeof item.id === "string" && canonicalUuid(item.id) !== null &&
     typeof item.source === "string" &&
-    (item.source_type === "URL" || item.source_type === "UPLOAD") &&
+    (item.source_type === "URL" || item.source_type === "UPLOAD" || item.source_type === "IMAGE_DATASET") &&
     STATUSES.includes(item.status as JobStatus) &&
     typeof item.created_at === "string" &&
     item.created_at.length > 0 &&
@@ -168,6 +170,16 @@ export async function getJobResult(jobId: string, signal?: AbortSignal): Promise
   const expectedId = canonicalUuid(jobId);
   if (!isResultManifest(payload) || expectedId === null || canonicalUuid(payload.job_id) !== expectedId) throw new ApiError(502, "MANIFEST_INVALID");
   return payload;
+}
+
+export async function getDatasetResult(jobId: string, signal?: AbortSignal): Promise<PublicDatasetManifest> {
+  const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/result`, { cache: "no-store", signal });
+  if (!response.ok) throw await errorFromResponse(response);
+  const value: unknown = await response.json();
+  if (!isRecord(value) || value.dataset_type !== "image" || value.schema_version !== 1 || canonicalUuid(String(value.job_id)) === null || !isRecord(value.summary) || !Array.isArray(value.images) || !Array.isArray(value.recommended_indices) || typeof value.accepted_download_url !== "string" || typeof value.yolo_download_url !== "string") throw new ApiError(502, "MANIFEST_INVALID");
+  const categories = new Set(["normal", "challenging", "unusable", "rejected"]);
+  if (!value.images.every((item, index) => isRecord(item) && item.index === index && typeof item.filename === "string" && categories.has(String(item.quality_category)) && typeof item.duplicate === "boolean" && (item.access_url === null || typeof item.access_url === "string") && (item.download_url === null || typeof item.download_url === "string"))) throw new ApiError(502, "MANIFEST_INVALID");
+  return value as unknown as PublicDatasetManifest;
 }
 
 export async function createFrameAccess(jobId: string, frameIndex: number, signal?: AbortSignal): Promise<FrameAccessResponse> {

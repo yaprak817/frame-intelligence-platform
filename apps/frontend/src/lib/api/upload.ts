@@ -48,3 +48,38 @@ export function uploadVideo(
   });
   return { promise, abort: () => xhr.abort() };
 }
+
+export function uploadImageDataset(
+  files: File[],
+  archive: boolean,
+  idempotencyKey: string,
+  onProgress: (percent: number | null) => void,
+): UploadRequest {
+  const xhr = new XMLHttpRequest();
+  const promise = new Promise<JobSubmissionResponse>((resolve, reject) => {
+    xhr.open("POST", "/api/v1/jobs/image-dataset");
+    xhr.setRequestHeader("Idempotency-Key", idempotencyKey);
+    xhr.responseType = "json";
+    xhr.upload.addEventListener("progress", (event) => {
+      onProgress(event.lengthComputable && event.total > 0
+        ? Math.min(100, Math.max(0, Math.round((event.loaded / event.total) * 100)))
+        : null);
+    });
+    xhr.addEventListener("load", () => {
+      const payload = xhr.response as JobSubmissionResponse | ApiErrorPayload | null;
+      if (xhr.status !== 202) {
+        reject(safeApiError(xhr.status, (payload ?? undefined) as ApiErrorPayload));
+      } else if (!payload || !("job_id" in payload) || typeof payload.job_id !== "string") {
+        reject(new ApiError(502));
+      } else {
+        resolve(payload as JobSubmissionResponse);
+      }
+    });
+    xhr.addEventListener("error", () => reject(new TypeError("Network request failed")));
+    xhr.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+    const data = new FormData();
+    for (const file of files) data.append(archive ? "archive" : "files", file);
+    xhr.send(data);
+  });
+  return { promise, abort: () => xhr.abort() };
+}

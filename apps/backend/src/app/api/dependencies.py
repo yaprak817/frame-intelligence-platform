@@ -29,6 +29,12 @@ def get_job_service(session: SessionDependency) -> JobService:
             max_bytes=settings.max_upload_bytes,
             chunk_bytes=settings.object_storage_multipart_chunk_bytes,
         ),
+        image_max_files=settings.image_dataset_max_files,
+        image_max_file_bytes=settings.image_dataset_max_file_bytes,
+        image_max_total_bytes=settings.image_dataset_max_total_bytes,
+        image_zip_max_compressed_bytes=(
+            settings.image_dataset_zip_max_compressed_bytes
+        ),
     )
 
 
@@ -40,6 +46,9 @@ def get_result_artifact_service(
         SQLAlchemyJobRepository(session),
         storage,
         settings.result_artifact_url_ttl_seconds,
+        settings.image_dataset_max_file_bytes,
+        settings.image_dataset_max_total_bytes,
+        settings.result_artifact_spool_min_free_bytes,
     )
 
 

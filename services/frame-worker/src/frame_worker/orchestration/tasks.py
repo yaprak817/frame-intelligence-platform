@@ -3,7 +3,7 @@ import random
 import time
 from uuid import UUID
 
-from celery.exceptions import MaxRetriesExceededError, Reject
+from celery.exceptions import MaxRetriesExceededError, Reject, SoftTimeLimitExceeded
 
 from frame_worker.orchestration.celery_app import celery_app, settings
 from frame_worker.orchestration.exports import (
@@ -13,6 +13,7 @@ from frame_worker.orchestration.exports import (
     create_export,
     fail_unleased_export,
 )
+from frame_worker.orchestration.failures import classify_failure
 from frame_worker.orchestration.repository import JobRepository
 from frame_worker.orchestration.runner import (
     JobRunner,
@@ -21,6 +22,10 @@ from frame_worker.orchestration.runner import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class TerminalTaskError(RuntimeError):
+    """Safe, serializable failure emitted after the retry budget is exhausted."""
 
 
 def build_runner() -> JobRunner:
@@ -35,7 +40,7 @@ def build_runner() -> JobRunner:
 @celery_app.task(
     bind=True,
     name="frame_worker.process_video",
-    max_retries=0,
+    max_retries=2,
     acks_late=True,
     reject_on_worker_lost=True,
     ignore_result=True,
@@ -64,16 +69,68 @@ def process_video(self, job_id: str) -> None:
                 "Job dispatch transaction is not visible", requeue=True
             ) from None
         except RetryableExecutionError as error:
-            if self.request.retries >= self.max_retries:
+            countdown = min(300, (2**self.request.retries) * 5)
+            countdown += random.uniform(0, countdown / 2)
+            if self.request.retries < self.max_retries:
+                raise self.retry(exc=error, countdown=countdown) from error
+            try:
+                raise self.retry(countdown=countdown) from error
+            except MaxRetriesExceededError as exhausted:
                 runner.repository.fail_queued(
                     parsed_job_id,
                     error.failure.code,
                     error.failure.message,
                 )
-                return
-            countdown = min(300, (2**self.request.retries) * 5)
+                terminal = TerminalTaskError(error.failure.code)
+                raise terminal from exhausted
+    finally:
+        runner.repository.close()
+
+
+@celery_app.task(
+    bind=True,
+    name="frame_worker.process_image_dataset",
+    max_retries=2,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    ignore_result=True,
+    soft_time_limit=settings.dataset_soft_time_limit_seconds,
+    time_limit=settings.dataset_hard_time_limit_seconds,
+)
+def process_image_dataset(self, job_id: str) -> None:
+    try:
+        parsed_job_id = UUID(job_id)
+    except (TypeError, ValueError) as error:
+        raise Reject("Invalid job identifier", requeue=False) from error
+    runner = build_runner()
+    try:
+        try:
+            runner.execute(parsed_job_id)
+        except RetryLaterError as error:
+            raise self.retry(exc=error, countdown=2) from error
+        except RetryableExecutionError as error:
+            countdown = min(60, (2**self.request.retries) * 5)
             countdown += random.uniform(0, countdown / 2)
-            raise self.retry(exc=error, countdown=countdown) from error
+            if self.request.retries < self.max_retries:
+                raise self.retry(exc=error, countdown=countdown) from error
+            try:
+                raise self.retry(countdown=countdown) from error
+            except MaxRetriesExceededError as exhausted:
+                runner.repository.fail_queued(
+                    parsed_job_id, error.failure.code, error.failure.message
+                )
+                raise TerminalTaskError(error.failure.code) from exhausted
+        except SoftTimeLimitExceeded as timeout:
+            error = RetryableExecutionError(classify_failure(timeout, "IMAGE_DATASET"))
+            if self.request.retries < self.max_retries:
+                raise self.retry(exc=error, countdown=5) from timeout
+            try:
+                raise self.retry(countdown=5) from timeout
+            except MaxRetriesExceededError as exhausted:
+                runner.repository.fail_queued(
+                    parsed_job_id, error.failure.code, error.failure.message
+                )
+                raise TerminalTaskError(error.failure.code) from exhausted
     finally:
         runner.repository.close()
 

@@ -16,6 +16,7 @@ class JobStatus(StrEnum):
 class SourceType(StrEnum):
     URL = "URL"
     UPLOAD = "UPLOAD"
+    IMAGE_DATASET = "IMAGE_DATASET"
 
 
 @dataclass(frozen=True)
@@ -38,3 +39,4 @@ class JobRecord:
 class ClaimResult:
     job: JobRecord | None
     retry_later: bool = False
+    stale_run_token: UUID | None = None

@@ -26,6 +26,7 @@ _ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
 class SourceType(StrEnum):
     URL = "URL"
     UPLOAD = "UPLOAD"
+    IMAGE_DATASET = "IMAGE_DATASET"
 
 
 class FailureCode(StrEnum):
@@ -41,3 +42,4 @@ class FailureCode(StrEnum):
 
 class OutboxEventType(StrEnum):
     PROCESS_VIDEO_JOB = "PROCESS_VIDEO_JOB"
+    PROCESS_IMAGE_DATASET_JOB = "PROCESS_IMAGE_DATASET_JOB"

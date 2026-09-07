@@ -1,6 +1,6 @@
-import { ResultGallery } from "@/components/results/result-gallery";
+import { ResultView } from "@/components/results/result-view";
 
 export default async function ResultPage({ params }: { params: Promise<{ jobId: string }> }) {
   const { jobId } = await params;
-  return <ResultGallery jobId={jobId} />;
+  return <ResultView jobId={jobId} />;
 }

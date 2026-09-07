@@ -6,7 +6,7 @@ const api = vi.hoisted(() => ({ createFrameAccess: vi.fn() }));
 vi.mock("@/lib/api/client", () => ({ createFrameAccess: api.createFrameAccess }));
 const hash = "a".repeat(64);
 const frame = (index: number): ResultFrame => ({ index, filename: `frame-${index}.jpg`, content_type: "image/jpeg", size_bytes: 10, sha256: hash, timestamp_ms: index * 1000, width: 10, height: 10, access_url: `/api/v1/jobs/job/result/frames/${index}/access` });
-const response = (index: number) => ({ url: `https://download.example/${index}`, expires_at: new Date(Date.now() + 60_000).toISOString(), content_type: "image/jpeg", size_bytes: 10, sha256: hash });
+const response = (index: number) => ({ url: `https://download.example/${index}`, expires_at: "2099-01-01T00:00:00.000Z", content_type: "image/jpeg", size_bytes: 10, sha256: hash });
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
