@@ -207,59 +207,73 @@ def test_pytest_status_bounds_untrusted_exit_code(value, capsys) -> None:
     assert capsys.readouterr().out == "pytest_status=FAILED exit_code=1\n"
 
 
-def _windows_registry(monkeypatch, tmp_path, ignore_graceful):
+WINDOWS_CONTROL_EVENT = 0x1FF
+
+
+def _windows_registry(
+    tmp_path, ignore_graceful, *, control_event=WINDOWS_CONTROL_EVENT
+):
     identity = harness.ProcessIdentity(12345, 1, "created")
-    registry = harness.ProcessRegistry(tmp_path / "registry.json")
-    registry._roots = {identity.pid}
-    registry._owned = {identity.pid: identity}
     live = [identity]
     signals = []
     ticks = iter(range(0, 1_000, 20))
-    monkeypatch.setattr(harness.sys, "platform", "win32")
-    monkeypatch.setattr(registry, "stop_monitor", lambda: None)
-    monkeypatch.setattr(registry, "_matching_live", lambda: list(live))
-    monkeypatch.setattr(harness.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
 
     def kill(pid, sent_signal):
         assert pid == identity.pid
         signals.append(sent_signal)
-        if sent_signal != harness.signal.CTRL_BREAK_EVENT or not ignore_graceful:
+        if sent_signal != control_event or not ignore_graceful:
             live.clear()
 
-    monkeypatch.setattr(harness.os, "kill", kill)
+    registry = harness.ProcessRegistry(
+        tmp_path / "registry.json",
+        windows=True,
+        windows_control_event=control_event,
+        signal_sender=kill,
+        monotonic=lambda: next(ticks),
+        sleep=lambda _seconds: None,
+    )
+    registry._roots = {identity.pid}
+    registry._owned = {identity.pid: identity}
+    registry.stop_monitor = lambda: None
+    registry._matching_live = lambda: list(live)
     return registry, signals
 
 
-def test_windows_graceful_exit_does_not_force(monkeypatch, tmp_path) -> None:
-    registry, signals = _windows_registry(monkeypatch, tmp_path, False)
+def test_windows_graceful_exit_does_not_force(tmp_path) -> None:
+    registry, signals = _windows_registry(tmp_path, False)
     registry.stop_all()
-    assert signals == [harness.signal.CTRL_BREAK_EVENT]
+    assert signals == [WINDOWS_CONTROL_EVENT]
 
 
 def test_windows_ignored_graceful_signal_uses_bounded_force(
-    monkeypatch, tmp_path
+    tmp_path,
 ) -> None:
-    registry, signals = _windows_registry(monkeypatch, tmp_path, True)
+    registry, signals = _windows_registry(tmp_path, True)
     registry.stop_all()
-    assert signals == [harness.signal.CTRL_BREAK_EVENT, harness.signal.SIGTERM]
+    assert signals == [WINDOWS_CONTROL_EVENT, harness.signal.SIGTERM]
 
 
-def test_windows_unavailable_graceful_group_still_uses_force(
-    monkeypatch, tmp_path
+def test_windows_graceful_sender_oserror_still_uses_force(
+    tmp_path,
 ) -> None:
-    registry, signals = _windows_registry(monkeypatch, tmp_path, True)
-    original_kill = harness.os.kill
+    registry, signals = _windows_registry(tmp_path, True)
+    original_kill = registry._signal_sender
 
     def kill(pid, sent_signal):
-        if sent_signal == harness.signal.CTRL_BREAK_EVENT:
+        if sent_signal == WINDOWS_CONTROL_EVENT:
             signals.append(sent_signal)
             raise OSError("console group is unavailable")
         original_kill(pid, sent_signal)
 
-    monkeypatch.setattr(harness.os, "kill", kill)
+    registry._signal_sender = kill
     registry.stop_all()
-    assert signals == [harness.signal.CTRL_BREAK_EVENT, harness.signal.SIGTERM]
+    assert signals == [WINDOWS_CONTROL_EVENT, harness.signal.SIGTERM]
+
+
+def test_windows_unavailable_control_event_uses_force(tmp_path) -> None:
+    registry, signals = _windows_registry(tmp_path, True, control_event=None)
+    registry.stop_all()
+    assert signals == [harness.signal.SIGTERM]
 
 
 def _wait_for(predicate, timeout=10):
