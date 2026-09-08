@@ -26,7 +26,7 @@ async function errorFromResponse(response: Response): Promise<ApiError> {
   } catch {
     payload = undefined;
   }
-  return safeApiError(response.status, payload);
+  return safeApiError(response.status, payload, response.headers.get("retry-after"));
 }
 
 function isSubmission(value: unknown): value is JobSubmissionResponse {

@@ -14,6 +14,7 @@ const CODE_MESSAGES: Record<string, string> = {
   RESULT_UNAVAILABLE: "Sonuçlara şu anda ulaşılamıyor.",
   MANIFEST_INVALID: "Sonuç verisi güvenli biçimde doğrulanamadı.",
   ARTIFACT_NOT_FOUND: "İstenen sonuç karesi bulunamadı.",
+  RATE_LIMITED: "Çok fazla istek gönderildi.",
 };
 
 const STATUS_MESSAGES: Record<number, string> = {
@@ -30,13 +31,18 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly code?: string,
+    public readonly retryAfterSeconds?: number,
   ) {
     super(code ? CODE_MESSAGES[code] ?? STATUS_MESSAGES[status] : STATUS_MESSAGES[status]);
     this.name = "ApiError";
   }
 }
 
-export function safeApiError(status: number, payload?: ApiErrorPayload): ApiError {
+export function safeApiError(
+  status: number,
+  payload?: ApiErrorPayload,
+  retryAfter?: string | null,
+): ApiError {
   const detail = payload?.detail;
   const code =
     detail && !Array.isArray(detail) && typeof detail === "object"
@@ -44,11 +50,23 @@ export function safeApiError(status: number, payload?: ApiErrorPayload): ApiErro
         ? detail.code
         : undefined
       : undefined;
-  return new ApiError(status, code);
+  const parsedRetryAfter = retryAfter && /^\d+$/.test(retryAfter)
+    ? Number(retryAfter)
+    : undefined;
+  return new ApiError(
+    status,
+    code,
+    parsedRetryAfter !== undefined && Number.isSafeInteger(parsedRetryAfter) && parsedRetryAfter > 0 && parsedRetryAfter <= 86_400
+      ? parsedRetryAfter
+      : undefined,
+  );
 }
 
 export function userErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === "RATE_LIMITED" && error.retryAfterSeconds) {
+      return `Çok fazla istek gönderildi. ${error.retryAfterSeconds} saniye bekleyip tekrar deneyin.`;
+    }
     return error.message || STATUS_MESSAGES[error.status] || "İstek tamamlanamadı.";
   }
   if (error instanceof DOMException && error.name === "AbortError") {
