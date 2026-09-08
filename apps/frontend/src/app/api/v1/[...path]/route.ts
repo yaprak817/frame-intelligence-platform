@@ -43,7 +43,7 @@ function safeContentLength(value: string | null): string | null {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? value : null;
 }
 
-function trustedBackendOrigin(): URL | null {
+export function trustedBackendOrigin(): URL | null {
   const configured = process.env.BACKEND_INTERNAL_URL;
   if (!configured) return null;
   try {
@@ -84,7 +84,7 @@ function canonicalClientIp(request: NextRequest): string | null {
   return null;
 }
 
-function requestHeaders(request: NextRequest): Headers {
+export function requestHeaders(request: NextRequest): Headers {
   const headers = new Headers();
   for (const name of REQUEST_HEADERS) {
     const value = request.headers.get(name);

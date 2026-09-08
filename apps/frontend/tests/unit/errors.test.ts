@@ -8,9 +8,16 @@ describe("safe error messages", () => {
     [413, { detail: "Uploaded video is too large" }, "Video izin verilen boyuttan büyük."],
     [415, { detail: "Unsupported video upload type" }, "Bu video biçimi desteklenmiyor."],
     [422, { detail: [] }, "Lütfen form alanlarını kontrol edin."],
+    [429, { detail: { code: "RATE_LIMITED", message: "internal" } }, "Çok fazla istek gönderildi."],
     [503, { detail: "http://minio:9000/private-key" }, "Hizmete şu anda ulaşılamıyor. Lütfen yeniden deneyin."],
   ])("maps HTTP %s without exposing detail", (status, payload, expected) => {
     expect(userErrorMessage(safeApiError(status, payload))).toBe(expected);
+  });
+
+  it("shows a bounded retry delay for rate limits", () => {
+    expect(userErrorMessage(safeApiError(429, { detail: { code: "RATE_LIMITED", message: "internal" } }, "7"))).toBe(
+      "Çok fazla istek gönderildi. 7 saniye bekleyip tekrar deneyin.",
+    );
   });
 
   it("maps worker failures without returning backend messages", () => {

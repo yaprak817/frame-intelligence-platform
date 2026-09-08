@@ -22,6 +22,7 @@ from app.security.rate_limit import (
     _signed_proxy_client,
     client_identifier,
     derive_rate_limit_key,
+    protected_group,
 )
 
 PROXY_SIGNATURE_DOMAIN = b"frame-intelligence-platform:proxy-client-ip:v1"
@@ -256,6 +257,81 @@ def test_real_http_redis_outage_is_safe_503() -> None:
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "RATE_LIMIT_UNAVAILABLE"
     assert "redis" not in response.text.lower()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_group"),
+    [
+        (
+            "/api/v1/jobs/11111111-1111-4111-8111-111111111111/result/images/0/preview",
+            "dataset-previews",
+        ),
+        (
+            "/api/v1/jobs/11111111-1111-4111-8111-111111111111/dataset-exports/accepted/download",
+            "dataset-downloads",
+        ),
+        (
+            "/api/v1/jobs/11111111-1111-4111-8111-111111111111/dataset-exports/yolo/download",
+            "dataset-downloads",
+        ),
+    ],
+)
+def test_dataset_previews_and_downloads_use_separate_buckets(
+    path: str, expected_group: str
+) -> None:
+    assert protected_group("GET", path) == (
+        expected_group,
+        "rate_limit_result_requests",
+    )
+    assert expected_group != "results"
+
+
+def test_preview_exhaustion_does_not_consume_dataset_download_quota() -> None:
+    class CountingRedis:
+        def __init__(self) -> None:
+            self.counts: dict[str, int] = {}
+
+        async def eval(self, _script, _numkeys, key, _ttl):
+            self.counts[key] = self.counts.get(key, 0) + 1
+            return [self.counts[key], 60_000]
+
+    redis = CountingRedis()
+    app = middleware_app(RedisRateLimiter(redis))
+    job = "11111111-1111-4111-8111-111111111111"
+
+    @app.get("/api/v1/jobs/{job_id}/result")
+    async def result(job_id: str):
+        return {"job_id": job_id}
+
+    @app.get("/api/v1/jobs/{job_id}/result/images/{index}/preview")
+    async def preview(job_id: str, index: int):
+        return {"job_id": job_id, "index": index}
+
+    @app.get("/api/v1/jobs/{job_id}/dataset-exports/{mode}/download")
+    async def download(job_id: str, mode: str):
+        return {"job_id": job_id, "mode": mode}
+
+    with TestClient(app) as client:
+        previews = [
+            client.get(f"/api/v1/jobs/{job}/result/images/{i}/preview")
+            for i in range(84)
+        ]
+        assert sum(response.status_code == 200 for response in previews) == 10
+        assert sum(response.status_code == 429 for response in previews) == 74
+        accepted = client.get(f"/api/v1/jobs/{job}/dataset-exports/accepted/download")
+        yolo = client.get(f"/api/v1/jobs/{job}/dataset-exports/yolo/download")
+        assert accepted.status_code == yolo.status_code == 200
+        for _ in range(8):
+            assert (
+                client.get(
+                    f"/api/v1/jobs/{job}/dataset-exports/accepted/download"
+                ).status_code
+                == 200
+            )
+        exhausted = client.get(f"/api/v1/jobs/{job}/dataset-exports/yolo/download")
+        assert exhausted.status_code == 429
+        assert 1 <= int(exhausted.headers["Retry-After"]) <= 60
+        assert client.get(f"/api/v1/jobs/{job}/result").status_code == 200
 
 
 @pytest.mark.parametrize(

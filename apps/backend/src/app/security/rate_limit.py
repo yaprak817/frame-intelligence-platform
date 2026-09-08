@@ -164,16 +164,6 @@ _RESULT_PATHS = (
         "GET",
         re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result/frames/[0-9]+/download$"),
     ),
-    (
-        "GET",
-        re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result/images/[0-9]+/preview$"),
-    ),
-    (
-        "GET",
-        re.compile(
-            r"^/api/v1/jobs/[0-9a-fA-F-]{36}/dataset-exports/(?:accepted|yolo)/download$"
-        ),
-    ),
     ("POST", re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/exports$")),
     (
         "GET",
@@ -181,6 +171,13 @@ _RESULT_PATHS = (
             r"^/api/v1/jobs/[0-9a-fA-F-]{36}/exports/[0-9a-fA-F-]{36}(?:/download)?$"
         ),
     ),
+)
+
+_DATASET_PREVIEW_PATH = re.compile(
+    r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result/images/[0-9]+/preview$"
+)
+_DATASET_DOWNLOAD_PATH = re.compile(
+    r"^/api/v1/jobs/[0-9a-fA-F-]{36}/dataset-exports/(?:accepted|yolo)/download$"
 )
 
 
@@ -191,6 +188,10 @@ def protected_group(method: str, path: str) -> tuple[str, str] | None:
         "/api/v1/jobs/image-dataset",
     }:
         return "submission", "rate_limit_submission_requests"
+    if method == "GET" and _DATASET_PREVIEW_PATH.fullmatch(path):
+        return "dataset-previews", "rate_limit_result_requests"
+    if method == "GET" and _DATASET_DOWNLOAD_PATH.fullmatch(path):
+        return "dataset-downloads", "rate_limit_result_requests"
     if any(
         method == allowed and pattern.fullmatch(path)
         for allowed, pattern in _RESULT_PATHS

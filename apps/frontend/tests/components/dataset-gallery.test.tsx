@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DatasetGallery } from "@/components/results/dataset-gallery";
@@ -36,12 +36,26 @@ describe("dataset result gallery", () => {
     const user = userEvent.setup();
     render(<DatasetGallery jobId="11111111-1111-4111-8111-111111111111" />);
     expect(await screen.findByRole("heading", { name: "Veri seti analizi" })).toBeVisible();
-    expect(screen.getByRole("link", { name: /Kabul edilen/ })).toHaveAttribute("href", "/accepted.zip");
-    expect(screen.getByRole("link", { name: /YOLO-ready/ })).toHaveAttribute("href", "/yolo.zip");
+    expect(screen.getByRole("link", { name: /Kabul edilen/ })).toHaveAttribute("href", expect.stringMatching(/\/accepted$/));
+    expect(screen.getByRole("link", { name: /YOLO-ready/ })).toHaveAttribute("href", expect.stringMatching(/\/yolo$/));
     expect(screen.getByRole("img")).toHaveAttribute("src", expect.stringMatching(/^\/api\/v1\//));
     await user.click(screen.getByRole("button", { name: "Kullanılamaz" }));
     expect(screen.getByText("Önizleme kullanılamıyor")).toBeVisible();
     expect(screen.queryByRole("link", { name: "İndir" })).not.toBeInTheDocument();
+  });
+
+  it("keeps a rate-limited download in the app and prevents duplicate requests", async () => {
+    const navigate = vi.fn();
+    render(<DatasetGallery jobId="11111111-1111-4111-8111-111111111111" initialDownloadError="Çok fazla istek gönderildi. 7 saniye bekleyip tekrar deneyin." downloadNavigator={navigate} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("7 saniye bekleyip tekrar deneyin");
+    const yolo = await screen.findByRole("link", { name: /YOLO-ready/ });
+    const accepted = screen.getByRole("link", { name: /Kabul edilen/ });
+    expect(fireEvent.click(yolo)).toBe(false);
+    expect(fireEvent.click(accepted)).toBe(false);
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledWith(expect.stringMatching(/\/yolo$/));
+    expect(yolo).toHaveAttribute("aria-disabled", "true");
+    expect(accepted).toHaveAttribute("aria-disabled", "true");
   });
 
   it.each(["FAILED", "RUNNING", "QUEUED"])(

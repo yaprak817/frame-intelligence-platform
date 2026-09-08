@@ -12,6 +12,8 @@ build/
 develop-eggs/
 dist/
 downloads/
+!apps/frontend/src/app/api/downloads/
+!apps/frontend/src/app/api/downloads/**
 eggs/
 .eggs/
 /lib/

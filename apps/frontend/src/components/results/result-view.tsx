@@ -5,11 +5,11 @@ import { getJobStatus } from "@/lib/api/client";
 import { DatasetGallery } from "./dataset-gallery";
 import { ResultGallery } from "./result-gallery";
 
-export function ResultView({ jobId }: { jobId: string }) {
-  return <ResolvedResultView key={jobId} jobId={jobId} />;
+export function ResultView({ jobId, downloadError = null }: { jobId: string; downloadError?: string | null }) {
+  return <ResolvedResultView key={jobId} jobId={jobId} downloadError={downloadError} />;
 }
 
-function ResolvedResultView({ jobId }: { jobId: string }) {
+function ResolvedResultView({ jobId, downloadError }: { jobId: string; downloadError: string | null }) {
   const [dataset, setDataset] = useState<boolean | null>(null);
   const [error, setError] = useState(false);
   useEffect(() => {
@@ -33,5 +33,5 @@ function ResolvedResultView({ jobId }: { jobId: string }) {
   }, [jobId]);
   if (error) return <main className="page-shell"><div className="alert error" role="alert">Sonuç türü doğrulanamadı.</div></main>;
   if (dataset === null) return <main className="page-shell"><div className="status-message" role="status">Sonuç türü alınıyor…</div></main>;
-  return dataset ? <DatasetGallery jobId={jobId} /> : <ResultGallery jobId={jobId} />;
+  return dataset ? <DatasetGallery jobId={jobId} initialDownloadError={downloadError} /> : <ResultGallery jobId={jobId} />;
 }

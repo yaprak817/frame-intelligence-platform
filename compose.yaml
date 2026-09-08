@@ -5,6 +5,7 @@ services:
     container_name: frame-intelligence-frontend
     environment:
       BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8000}
+      IMAGE_DATASET_ZIP_MAX_COMPRESSED_BYTES: ${IMAGE_DATASET_ZIP_MAX_COMPRESSED_BYTES:-2147483648}
     ports:
       - "3000:3000"
     depends_on:
