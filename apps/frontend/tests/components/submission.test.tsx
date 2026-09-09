@@ -76,12 +76,15 @@ describe("job submission", () => {
     expect(FakeXHR.instances).toHaveLength(1);
   });
 
-  it("keeps a single submission lifecycle under Strict Mode", () => {
+  it("keeps a single submission lifecycle and navigates under Strict Mode", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ job_id: "job-url", status: "PENDING_DISPATCH", status_url: "/api/v1/jobs/job-url" }), { status: 202, headers: { "Content-Type": "application/json" } }));
     render(<StrictMode><JobSubmission /></StrictMode>);
-    const input = screen.getByLabelText("Video dosyası");
-    fireEvent.change(input, { target: { files: [new File(["video"], "clip.mp4", { type: "video/mp4" })] } });
+    fireEvent.click(screen.getByRole("tab", { name: "Video URL’si" }));
+    const input = screen.getByLabelText("Video bağlantısı");
+    fireEvent.change(input, { target: { value: "https://example.com/video" } });
     fireEvent.submit(input.closest("form")!);
-    expect(FakeXHR.instances).toHaveLength(1);
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/jobs/job-url"));
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it.each([413, 415, 422])("shows a safe Turkish message for %s", async (status) => {
