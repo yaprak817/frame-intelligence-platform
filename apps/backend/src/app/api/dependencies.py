@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.db.session import get_session
 from app.repositories.jobs import SQLAlchemyJobRepository
 from app.security.source_secrets import SourceSecretCipher
+from app.services.annotations import AnnotationService
 from app.services.frame_exports import FrameExportService
 from app.services.job_service import JobService
 from app.services.result_artifacts import ResultArtifactService
@@ -61,6 +62,12 @@ def get_frame_export_service(
         max_frames=settings.frame_export_max_frames,
         max_total_bytes=settings.frame_export_max_total_bytes,
     )
+
+
+def get_annotation_service(
+    request: Request, session: SessionDependency
+) -> AnnotationService:
+    return AnnotationService(session, get_result_artifact_service(request, session))
 
 
 async def authorize_result_access() -> None:

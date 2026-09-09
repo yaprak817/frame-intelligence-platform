@@ -222,6 +222,9 @@ def middleware_app(limiter) -> FastAPI:
         internal_proxy_shared_secret=PROXY_SECRET,
         rate_limit_submission_requests=2,
         rate_limit_result_requests=10,
+        rate_limit_annotation_read_requests=2,
+        rate_limit_annotation_mutation_requests=2,
+        annotation_max_payload_bytes=256 * 1024,
         rate_limit_window_seconds=60,
     )
     app.add_middleware(RateLimitMiddleware)
@@ -332,6 +335,52 @@ def test_preview_exhaustion_does_not_consume_dataset_download_quota() -> None:
         assert exhausted.status_code == 429
         assert 1 <= int(exhausted.headers["Retry-After"]) <= 60
         assert client.get(f"/api/v1/jobs/{job}/result").status_code == 200
+
+
+def test_annotation_read_and_mutation_quotas_are_behaviorally_isolated() -> None:
+    class CountingRedis:
+        def __init__(self) -> None:
+            self.counts: dict[str, int] = {}
+
+        async def eval(self, _script, _numkeys, key, _ttl):
+            self.counts[key] = self.counts.get(key, 0) + 1
+            return [self.counts[key], 60_000]
+
+    redis = CountingRedis()
+    app = middleware_app(RedisRateLimiter(redis, namespace="fip:test:annotation"))
+    job = "11111111-1111-4111-8111-111111111111"
+
+    @app.get("/api/v1/jobs/{job_id}/annotations")
+    async def annotation_read(job_id: str):
+        return {"job_id": job_id}
+
+    @app.get("/api/v1/jobs/{job_id}/annotations/images/{index}/preview")
+    async def annotation_preview(job_id: str, index: int):
+        return {"job_id": job_id, "index": index}
+
+    @app.post("/api/v1/jobs/{job_id}/annotations/classes")
+    async def annotation_mutation(job_id: str):
+        return {"job_id": job_id}
+
+    with TestClient(app, client=("192.0.2.44", 50000)) as client:
+        assert client.get(f"/api/v1/jobs/{job}/annotations").status_code == 200
+        assert (
+            client.get(f"/api/v1/jobs/{job}/annotations/images/0/preview").status_code
+            == 200
+        )
+        exhausted_read = client.get(f"/api/v1/jobs/{job}/annotations")
+        assert exhausted_read.status_code == 429
+        assert 1 <= int(exhausted_read.headers["Retry-After"]) <= 60
+
+        assert client.post(f"/api/v1/jobs/{job}/annotations/classes").status_code == 200
+        assert client.post(f"/api/v1/jobs/{job}/annotations/classes").status_code == 200
+        exhausted_mutation = client.post(f"/api/v1/jobs/{job}/annotations/classes")
+        assert exhausted_mutation.status_code == 429
+        assert 1 <= int(exhausted_mutation.headers["Retry-After"]) <= 60
+
+    assert any(":annotation-read:" in key for key in redis.counts)
+    assert any(":annotation-mutation:" in key for key in redis.counts)
+    assert all("192.0.2.44" not in key for key in redis.counts)
 
 
 @pytest.mark.parametrize(
