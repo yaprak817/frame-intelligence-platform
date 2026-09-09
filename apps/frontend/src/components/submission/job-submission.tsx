@@ -56,10 +56,13 @@ export function JobSubmission() {
   const generation = useRef(0);
   const tabs = useRef<Array<HTMLButtonElement | null>>([]);
 
-  useEffect(() => () => {
-    mounted.current = false;
-    generation.current += 1;
-    abort.current?.();
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      generation.current += 1;
+      abort.current?.();
+    };
   }, []);
   useEffect(() => {
     if (Object.keys(errors).length) firstError.current?.focus();
