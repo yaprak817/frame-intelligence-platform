@@ -9,6 +9,7 @@ dependencies = [
     "celery[redis]>=5.4",
     "cryptography>=45",
     "fastapi[standard]",
+    "pillow==12.3.0",
     "pydantic-settings>=2.0",
     "psycopg[binary]>=3.2",
     "sqlalchemy>=2.0",

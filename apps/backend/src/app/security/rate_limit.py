@@ -179,6 +179,9 @@ _DATASET_PREVIEW_PATH = re.compile(
 _DATASET_DOWNLOAD_PATH = re.compile(
     r"^/api/v1/jobs/[0-9a-fA-F-]{36}/dataset-exports/(?:accepted|yolo)/download$"
 )
+_ANNOTATION_PATH = re.compile(
+    r"^/api/v1/jobs/[0-9a-fA-F-]{36}/annotations(?:/classes(?:/[0-9a-fA-F-]{36})?|/images/[0-9]+(?:/preview)?)?$"
+)
 
 
 def protected_group(method: str, path: str) -> tuple[str, str] | None:
@@ -192,6 +195,11 @@ def protected_group(method: str, path: str) -> tuple[str, str] | None:
         return "dataset-previews", "rate_limit_result_requests"
     if method == "GET" and _DATASET_DOWNLOAD_PATH.fullmatch(path):
         return "dataset-downloads", "rate_limit_result_requests"
+    if _ANNOTATION_PATH.fullmatch(path):
+        if method == "GET":
+            return "annotation-read", "rate_limit_annotation_read_requests"
+        if method in {"POST", "PUT", "PATCH", "DELETE"}:
+            return "annotation-mutation", "rate_limit_annotation_mutation_requests"
     if any(
         method == allowed and pattern.fullmatch(path)
         for allowed, pattern in _RESULT_PATHS
@@ -214,6 +222,25 @@ class RateLimitMiddleware:
             return
         group, limit_setting = match
         settings = scope["app"].state.settings
+        if _ANNOTATION_PATH.fullmatch(scope["path"]) and scope["method"] in {
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+        }:
+            raw_length = Headers(scope=scope).get("content-length")
+            if raw_length is not None:
+                try:
+                    too_large = int(raw_length) > settings.annotation_max_payload_bytes
+                except ValueError:
+                    too_large = True
+                if too_large:
+                    await _error_response(
+                        413,
+                        "ANNOTATION_LIMIT_EXCEEDED",
+                        "Annotation payload is too large",
+                    )(scope, receive, send)
+                    return
         limiter: RedisRateLimiter = scope["app"].state.rate_limiter
         identifier = client_identifier(
             scope,
@@ -278,10 +305,40 @@ class RateLimitMiddleware:
                     413, "DATASET_TOO_LARGE", "Dataset upload is too large"
                 )(scope, receive, send)
             return
+        if _ANNOTATION_PATH.fullmatch(scope["path"]) and scope["method"] in {
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+        }:
+            consumed = 0
+
+            async def bounded_annotation_receive():
+                nonlocal consumed
+                message = await receive()
+                if message["type"] == "http.request":
+                    consumed += len(message.get("body", b""))
+                    if consumed > settings.annotation_max_payload_bytes:
+                        raise AnnotationRequestTooLarge
+                return message
+
+            try:
+                await self.app(scope, bounded_annotation_receive, send)
+            except AnnotationRequestTooLarge:
+                await _error_response(
+                    413,
+                    "ANNOTATION_LIMIT_EXCEEDED",
+                    "Annotation payload is too large",
+                )(scope, receive, send)
+            return
         await self.app(scope, receive, send)
 
 
 class DatasetRequestTooLarge(RuntimeError):
+    pass
+
+
+class AnnotationRequestTooLarge(RuntimeError):
     pass
 
 

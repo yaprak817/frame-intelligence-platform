@@ -5,10 +5,12 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 
 from app.domain.jobs import JobStatus
@@ -189,6 +191,39 @@ class ResultArtifactService:
             self._dataset_image_max_bytes,
         )
 
+    async def annotation_source(
+        self, job_id: UUID
+    ) -> tuple[ProcessingJob, StoredDatasetManifestV1]:
+        job, manifest = await self._load(job_id)
+        if not isinstance(manifest, StoredDatasetManifestV1):
+            raise ResultUnavailableError
+        return job, manifest
+
+    async def dataset_yolo_preview(
+        self, job_id: UUID, run_token: UUID, image_index: int
+    ) -> ObjectStream:
+        _job, manifest = await self.annotation_source(job_id)
+        if manifest.run_token != run_token:
+            raise ResultUnavailableError
+        if image_index < 0 or image_index >= len(manifest.images):
+            raise ArtifactNotFoundError
+        image = manifest.images[image_index]
+        if (
+            image.index != image_index
+            or image.yolo_object_key is None
+            or image.output_width != 640
+            or image.output_height != 640
+        ):
+            raise ArtifactNotFoundError
+        return await self._verified_stream(
+            image.yolo_object_key,
+            image.yolo_size_bytes,
+            image.yolo_sha256,
+            "image/jpeg",
+            self._dataset_image_max_bytes,
+            file_validator=_validate_yolo_jpeg,
+        )
+
     async def _load(
         self, job_id: UUID
     ) -> tuple[ProcessingJob, StoredManifestV1 | StoredDatasetManifestV1]:
@@ -262,6 +297,8 @@ class ResultArtifactService:
         expected_sha256: str,
         expected_content_type: str,
         max_bytes: int,
+        *,
+        file_validator: Callable[[str], None] | None = None,
     ) -> ObjectStream:
         if expected_size <= 0 or expected_size > max_bytes:
             raise ManifestInvalidError
@@ -292,6 +329,8 @@ class ResultArtifactService:
                 or digest.hexdigest() != expected_sha256
             ):
                 raise ManifestInvalidError
+            if file_validator is not None:
+                await asyncio.to_thread(file_validator, path)
             stream = ObjectStream(
                 body=_DeletingFileBody(path),
                 metadata=source.metadata,
@@ -327,6 +366,25 @@ class _DeletingFileBody:
                 os.unlink(self._path)
             except FileNotFoundError:
                 pass
+
+
+def _validate_yolo_jpeg(path: str) -> None:
+    try:
+        with Image.open(path) as image:
+            if image.format != "JPEG" or image.size != (640, 640):
+                raise ManifestInvalidError
+            image.verify()
+        with Image.open(path) as image:
+            if image.format != "JPEG" or image.size != (640, 640):
+                raise ManifestInvalidError
+            image.load()
+    except (
+        Image.DecompressionBombError,
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+    ) as error:
+        raise ManifestInvalidError from error
 
 
 def _download_filename(index: int, timestamp_ms: int, content_type: str) -> str:

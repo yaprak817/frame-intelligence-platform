@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     internal_proxy_shared_secret: str = ""
     rate_limit_submission_requests: int = 10
     rate_limit_result_requests: int = 60
+    rate_limit_annotation_read_requests: int = 120
+    rate_limit_annotation_mutation_requests: int = 30
+    annotation_max_payload_bytes: int = 256 * 1024
     rate_limit_window_seconds: int = 60
     dependency_timeout_seconds: float = 2.0
     outbox_poll_interval_seconds: float = 1.0
@@ -205,6 +208,18 @@ class Settings(BaseSettings):
             )
         if not 1 <= self.rate_limit_result_requests <= 100_000:
             raise ValueError("RATE_LIMIT_RESULT_REQUESTS must be between 1 and 100000")
+        if not 1 <= self.rate_limit_annotation_read_requests <= 100_000:
+            raise ValueError(
+                "RATE_LIMIT_ANNOTATION_READ_REQUESTS must be between 1 and 100000"
+            )
+        if not 1 <= self.rate_limit_annotation_mutation_requests <= 100_000:
+            raise ValueError(
+                "RATE_LIMIT_ANNOTATION_MUTATION_REQUESTS must be between 1 and 100000"
+            )
+        if not 1024 <= self.annotation_max_payload_bytes <= 1024 * 1024:
+            raise ValueError(
+                "ANNOTATION_MAX_PAYLOAD_BYTES must be between 1024 and 1048576"
+            )
         if not 1 <= self.rate_limit_window_seconds <= 86_400:
             raise ValueError("RATE_LIMIT_WINDOW_SECONDS must be between 1 and 86400")
         if not 0.1 <= self.dependency_timeout_seconds <= 10.0:
