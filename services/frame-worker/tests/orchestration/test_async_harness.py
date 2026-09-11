@@ -201,6 +201,78 @@ def test_structured_redaction_covers_labeled_sensitive_fields() -> None:
     assert redacted == " ".join(f"{label}=[REDACTED]" for label in labels)
 
 
+def test_harness_requires_current_single_migration_head() -> None:
+    assert harness.TARGET_REVISION == "20260909_0006"
+    assert harness.DEPENDENCY_PREP_TIMEOUT_SECONDS == 300
+    assert harness.MIGRATION_TIMEOUT_SECONDS == 120
+
+
+def test_database_url_normalizes_only_localhost_for_windows_selector_loop() -> None:
+    local = harness._database_url(
+        "postgresql://user:password@localhost:5432/postgres", "task"
+    )
+    remote = harness._database_url(
+        "postgresql://user:password@database.internal:5432/postgres", "task"
+    )
+    assert "@127.0.0.1:5432/task" in local
+    assert "@database.internal:5432/task" in remote
+
+
+def test_storage_cleanup_before_bucket_creation_is_a_safe_noop() -> None:
+    class UnexpectedClient:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected storage call: {name}")
+
+    harness._cleanup_task_bucket(UnexpectedClient(), "task-owned", created=False)
+
+
+def test_storage_cleanup_aborts_multipart_and_removes_versions_and_objects() -> None:
+    calls = []
+
+    class Client:
+        inventory = [{"Key": "object"}]
+
+        def list_multipart_uploads(self, **_kwargs):
+            return {"Uploads": [{"Key": "partial", "UploadId": "upload"}]}
+
+        def abort_multipart_upload(self, **kwargs):
+            calls.append(("abort", kwargs["Key"]))
+
+        def list_object_versions(self, **_kwargs):
+            return {
+                "Versions": [{"Key": "versioned", "VersionId": "v1"}],
+                "DeleteMarkers": [{"Key": "deleted", "VersionId": "v2"}],
+            }
+
+        def delete_objects(self, **kwargs):
+            calls.append(("delete", len(kwargs["Delete"]["Objects"])))
+            self.inventory = []
+
+        def list_objects_v2(self, **_kwargs):
+            return {"Contents": self.inventory}
+
+        def delete_bucket(self, **_kwargs):
+            calls.append(("bucket", None))
+
+    harness._cleanup_task_bucket(Client(), "task-owned", created=True)
+    assert calls == [("abort", "partial"), ("delete", 2), ("bucket", None)]
+
+
+def test_storage_cleanup_retry_exhaustion_is_bounded() -> None:
+    attempts = []
+
+    class Client:
+        def list_multipart_uploads(self, **_kwargs):
+            attempts.append(1)
+            raise RuntimeError("secret storage failure")
+
+    with pytest.raises(RuntimeError, match="secret storage failure"):
+        harness._cleanup_task_bucket(
+            Client(), "task-owned", created=True, sleep=lambda _seconds: None
+        )
+    assert len(attempts) == harness.STORAGE_CLEANUP_MAX_ATTEMPTS
+
+
 @pytest.mark.parametrize("value", [-1, 256, True, None, "7"])
 def test_pytest_status_bounds_untrusted_exit_code(value, capsys) -> None:
     assert harness._publish_pytest_status(value) == 1
