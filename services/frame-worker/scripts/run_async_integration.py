@@ -25,7 +25,11 @@ import psycopg
 import redis
 from botocore.exceptions import ClientError
 
-TARGET_REVISION = "20260902_0005"
+TARGET_REVISION = "20260909_0006"
+STORAGE_CLEANUP_MAX_OBJECTS = 10_000
+STORAGE_CLEANUP_MAX_ATTEMPTS = 5
+DEPENDENCY_PREP_TIMEOUT_SECONDS = 300
+MIGRATION_TIMEOUT_SECONDS = 120
 CLEANUP_FAILURE_EXIT = 2
 REQUIRED_CLEANUP_STEPS = (
     "PROCESS_TREE_STOP",
@@ -110,7 +114,16 @@ def _wait_for_pytest(
 
 def _database_url(base: str, name: str) -> str:
     parsed = urlsplit(base.replace("postgresql+psycopg://", "postgresql://", 1))
-    return urlunsplit((*parsed[:2], f"/{name}", parsed.query, parsed.fragment))
+    netloc = parsed.netloc
+    if parsed.hostname == "localhost":
+        credentials = ""
+        if "@" in netloc:
+            credentials = netloc.rsplit("@", 1)[0] + "@"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        netloc = f"{credentials}127.0.0.1{port}"
+    return urlunsplit(
+        (parsed.scheme, netloc, f"/{name}", parsed.query, parsed.fragment)
+    )
 
 
 def _free_loopback_port() -> int:
@@ -167,6 +180,91 @@ def _run_cleanup_steps(
         except Exception:
             errors.append(code)
     return errors
+
+
+def _cleanup_task_bucket(
+    client: object,
+    bucket: str,
+    *,
+    created: bool,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Remove only the task-owned bucket, with bounded retries."""
+    if not created:
+        return
+    deleted = 0
+    for attempt in range(STORAGE_CLEANUP_MAX_ATTEMPTS):
+        try:
+            uploads = client.list_multipart_uploads(Bucket=bucket)
+            while True:
+                for upload in uploads.get("Uploads", []):
+                    client.abort_multipart_upload(
+                        Bucket=bucket,
+                        Key=upload["Key"],
+                        UploadId=upload["UploadId"],
+                    )
+                    deleted += 1
+                    if deleted > STORAGE_CLEANUP_MAX_OBJECTS:
+                        raise RuntimeError("Storage cleanup bound exceeded")
+                if not uploads.get("IsTruncated"):
+                    break
+                uploads = client.list_multipart_uploads(
+                    Bucket=bucket,
+                    KeyMarker=uploads["NextKeyMarker"],
+                    UploadIdMarker=uploads["NextUploadIdMarker"],
+                )
+
+            versions = client.list_object_versions(Bucket=bucket)
+            while True:
+                entries = versions.get("Versions", []) + versions.get(
+                    "DeleteMarkers", []
+                )
+                if entries:
+                    client.delete_objects(
+                        Bucket=bucket,
+                        Delete={
+                            "Objects": [
+                                {"Key": item["Key"], "VersionId": item["VersionId"]}
+                                for item in entries
+                            ],
+                            "Quiet": True,
+                        },
+                    )
+                    deleted += len(entries)
+                    if deleted > STORAGE_CLEANUP_MAX_OBJECTS:
+                        raise RuntimeError("Storage cleanup bound exceeded")
+                if not versions.get("IsTruncated"):
+                    break
+                versions = client.list_object_versions(
+                    Bucket=bucket,
+                    KeyMarker=versions["NextKeyMarker"],
+                    VersionIdMarker=versions["NextVersionIdMarker"],
+                )
+
+            while True:
+                inventory = client.list_objects_v2(Bucket=bucket, MaxKeys=1000)
+                contents = inventory.get("Contents", [])
+                if not contents:
+                    break
+                client.delete_objects(
+                    Bucket=bucket,
+                    Delete={
+                        "Objects": [{"Key": item["Key"]} for item in contents],
+                        "Quiet": True,
+                    },
+                )
+                deleted += len(contents)
+                if deleted > STORAGE_CLEANUP_MAX_OBJECTS:
+                    raise RuntimeError("Storage cleanup bound exceeded")
+
+            if client.list_objects_v2(Bucket=bucket, MaxKeys=1).get("Contents"):
+                raise RuntimeError("Storage cleanup verification failed")
+            client.delete_bucket(Bucket=bucket)
+            return
+        except Exception:
+            if attempt + 1 == STORAGE_CLEANUP_MAX_ATTEMPTS:
+                raise
+            sleep(0.1 * (2**attempt))
 
 
 def _publish_cleanup_receipt(path: Path | None, errors: list[str]) -> list[str]:
@@ -563,6 +661,8 @@ def main(
     )
     interrupted = False
     test_exit_code = 1
+    bucket_created = False
+    phase = "DEPENDENCY_PREP"
 
     def cleanup_redis() -> None:
         client = redis.Redis(
@@ -585,12 +685,22 @@ def main(
     try:
         with psycopg.connect(admin_url, autocommit=True) as connection:
             connection.execute(f'CREATE DATABASE "{database_name}"')
-        migration = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "head"],
+        dependency_prep = subprocess.run(
+            ["uv", "sync", "--locked", "--dev"],
             cwd=backend,
             env=env,
             capture_output=True,
-            timeout=120,
+            timeout=DEPENDENCY_PREP_TIMEOUT_SECONDS,
+        )
+        if dependency_prep.returncode != 0:
+            raise RuntimeError("Locked dependency preparation failed")
+        phase = "MIGRATION"
+        migration = subprocess.run(
+            ["uv", "run", "--no-sync", "alembic", "upgrade", "head"],
+            cwd=backend,
+            env=env,
+            capture_output=True,
+            timeout=MIGRATION_TIMEOUT_SECONDS,
         )
         if migration.returncode != 0:
             raise RuntimeError(
@@ -604,6 +714,8 @@ def main(
         if revision != (TARGET_REVISION,):
             raise RuntimeError("Migration did not reach the required head")
         s3.create_bucket(Bucket=bucket)
+        bucket_created = True
+        phase = "BACKEND_READINESS"
 
         if sys.platform == "win32":
             loop_factory = (
@@ -658,9 +770,11 @@ def main(
             process_registry.register_root(child.pid)
             if name == "backend":
                 _wait_ready(child, port, 30)
+                phase = "PUBLISHER_READINESS"
             else:
                 _wait_file_ready(child, publisher_ready, 30)
 
+        phase = "PYTEST"
         pytest_args = args.pytest_args or ["tests"]
         if pytest_args and pytest_args[0] == "--":
             pytest_args = pytest_args[1:]
@@ -695,7 +809,7 @@ def main(
     except KeyboardInterrupt:
         test_exit_code = 1
     except Exception:
-        print("run_failed=RUN_FAILED", file=sys.stderr)
+        print(f"run_failed=RUN_FAILED phase={phase}", file=sys.stderr)
         if test_exit_code == 0:
             test_exit_code = 1
     finally:
@@ -710,18 +824,7 @@ def main(
                 raise RuntimeError("Redis cleanup verification failed")
 
         def cleanup_storage() -> None:
-            token = None
-            while True:
-                arguments = {"Bucket": bucket}
-                if token:
-                    arguments["ContinuationToken"] = token
-                response = s3.list_objects_v2(**arguments)
-                for item in response.get("Contents", []):
-                    s3.delete_object(Bucket=bucket, Key=item["Key"])
-                if not response.get("IsTruncated"):
-                    break
-                token = response["NextContinuationToken"]
-            s3.delete_bucket(Bucket=bucket)
+            _cleanup_task_bucket(s3, bucket, created=bucket_created)
 
         def verify_storage() -> None:
             try:
