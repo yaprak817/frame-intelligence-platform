@@ -9,6 +9,10 @@ import type {
   FrameAccessResponse,
   FrameExportResponse,
   PublicDatasetManifest,
+  AnnotationProject,
+  AnnotationClass,
+  ImageAnnotations,
+  AnnotationBox,
 } from "./types";
 
 const STATUSES: JobStatus[] = [
@@ -219,4 +223,101 @@ export async function getFrameExport(statusUrl: string, signal?: AbortSignal): P
   const response = await fetch(statusUrl, { cache: "no-store", signal });
   if (!response.ok) throw await errorFromResponse(response);
   const payload: unknown = await response.json(); if (!isFrameExport(payload)) throw new ApiError(502); return payload;
+}
+
+const ANNOTATION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ANNOTATION_COLOR = /^#[0-9a-f]{6}$/i;
+const ANNOTATION_DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+// Upper-then-lower covers Unicode folds such as ß/SS that lowercasing alone misses.
+const normalizedAnnotationName = (value: string) => value.trim().toLocaleUpperCase("und").toLocaleLowerCase("und").normalize("NFC");
+const isAnnotationName = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 80 && value === value.trim().normalize("NFC") && !/\p{C}/u.test(value);
+const isSafeRelativePath = (value: unknown) => typeof value === "string" && value.startsWith("/") && !value.startsWith("//") && !value.includes("\\");
+const isAnnotationClass = (value: unknown): value is AnnotationClass => isRecord(value) && exactKeys(value, ["id", "yolo_index", "name", "color"]) &&
+  typeof value.id === "string" && ANNOTATION_UUID.test(value.id) && isSafeInteger(value.yolo_index) && isAnnotationName(value.name) && typeof value.color === "string" && ANNOTATION_COLOR.test(value.color);
+const annotationCoordinate = (value: unknown): number | null => {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.length === 0 || value.length > 64 || !ANNOTATION_DECIMAL.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+const parseAnnotationBox = (value: unknown): AnnotationBox | null => {
+  if (!isRecord(value) || !exactKeys(value, ["id", "class_id", "x_center", "y_center", "width", "height"]) || typeof value.id !== "string" || !ANNOTATION_UUID.test(value.id) || typeof value.class_id !== "string" || !ANNOTATION_UUID.test(value.class_id)) return null;
+  const values = [value.x_center, value.y_center, value.width, value.height].map(annotationCoordinate);
+  if (values.some((item) => item === null)) return null;
+  const [x, y, width, height] = values as number[];
+  if (width <= 0 || height <= 0 || x - width / 2 < 0 || x + width / 2 > 1 || y - height / 2 < 0 || y + height / 2 > 1) return null;
+  return { id: value.id, class_id: value.class_id, x_center: x, y_center: y, width, height };
+};
+function isAnnotationProject(value: unknown): value is AnnotationProject {
+  if (!isRecord(value) || !exactKeys(value, ["id", "job_id", "revision", "classes", "images", "page", "page_size", "total_images", "limits"]) || typeof value.id !== "string" || !ANNOTATION_UUID.test(value.id) || typeof value.job_id !== "string" || !ANNOTATION_UUID.test(value.job_id) || !isSafeInteger(value.revision) || !Array.isArray(value.classes) || !value.classes.every(isAnnotationClass) || !Array.isArray(value.images) || !isSafeInteger(value.page, 1) || !isSafeInteger(value.page_size, 1) || !isSafeInteger(value.total_images)) return false;
+  if (!value.images.every((item) => isRecord(item) && exactKeys(item, ["index", "filename", "completed", "box_count", "preview_url"]) && isSafeInteger(item.index) && typeof item.filename === "string" && typeof item.completed === "boolean" && isSafeInteger(item.box_count) && isSafeRelativePath(item.preview_url))) return false;
+  const classes = value.classes as AnnotationClass[];
+  const images = value.images as AnnotationProject["images"];
+  if (new Set(classes.map((item) => item.id.toLowerCase())).size !== classes.length ||
+      new Set(classes.map((item) => item.yolo_index)).size !== classes.length ||
+      new Set(classes.map((item) => normalizedAnnotationName(item.name))).size !== classes.length ||
+      new Set(images.map((item) => item.index)).size !== images.length) return false;
+  const limits = value.limits;
+  return isRecord(limits) && exactKeys(limits, ["max_classes", "max_boxes_per_image", "max_boxes_per_project"]) && isSafeInteger(limits.max_classes, 1) && isSafeInteger(limits.max_boxes_per_image, 1) && isSafeInteger(limits.max_boxes_per_project, 1);
+}
+function parseImageAnnotations(value: unknown): ImageAnnotations | null {
+  if (!isRecord(value) || !exactKeys(value, ["project_revision", "image_index", "completed", "boxes"]) || !isSafeInteger(value.project_revision) || !isSafeInteger(value.image_index) || typeof value.completed !== "boolean" || !Array.isArray(value.boxes) || value.boxes.length > 200) return null;
+  const boxes = value.boxes.map(parseAnnotationBox);
+  if (boxes.some((item) => item === null)) return null;
+  const parsed = boxes as AnnotationBox[];
+  if (new Set(parsed.map((item) => item.id.toLowerCase())).size !== parsed.length) return null;
+  return { project_revision: value.project_revision as number, image_index: value.image_index as number, completed: value.completed, boxes: parsed };
+}
+async function annotationRequest(path: string, init: RequestInit = {}): Promise<unknown> {
+  const response = await fetch(path, { ...init, cache: "no-store" });
+  if (!response.ok) throw await errorFromResponse(response);
+  return response.json();
+}
+async function createProjectPage(jobId: string, signal?: AbortSignal): Promise<AnnotationProject> {
+  if (!ANNOTATION_UUID.test(jobId)) throw new ApiError(404, "ANNOTATION_NOT_AVAILABLE");
+  const key = jobId.toLowerCase();
+  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(key)}/annotations?page=1&page_size=100`, { method: "POST", signal });
+  if (!isAnnotationProject(value) || value.job_id.toLowerCase() !== key) throw new ApiError(502, "MANIFEST_INVALID");
+  if (!value.images.every((item) => item.preview_url === `/api/v1/jobs/${encodeURIComponent(key)}/annotations/images/${item.index}/preview`)) throw new ApiError(502, "MANIFEST_INVALID");
+  return value;
+}
+export async function getOrCreateAnnotationProject(jobId: string, signal?: AbortSignal): Promise<AnnotationProject> {
+  const first = await createProjectPage(jobId, signal);
+  if (first.images.length >= first.total_images) return first;
+  const images = [...first.images];
+  for (let page = 2; images.length < first.total_images; page += 1) {
+    const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(first.job_id)}/annotations?page=${page}&page_size=100`, { signal });
+    if (!isAnnotationProject(value) || value.id !== first.id || value.revision !== first.revision || value.page !== page || value.images.length === 0) throw new ApiError(502, "MANIFEST_INVALID");
+    if (!value.images.every((item) => item.preview_url === `/api/v1/jobs/${encodeURIComponent(first.job_id)}/annotations/images/${item.index}/preview`)) throw new ApiError(502, "MANIFEST_INVALID");
+    images.push(...value.images);
+  }
+  if (images.length !== first.total_images || new Set(images.map((item) => item.index)).size !== images.length) throw new ApiError(502, "MANIFEST_INVALID");
+  return { ...first, images };
+}
+export async function getImageAnnotations(jobId: string, imageIndex: number, signal?: AbortSignal): Promise<ImageAnnotations> {
+  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/images/${imageIndex}`, { signal });
+  const parsed = parseImageAnnotations(value);
+  if (!parsed || parsed.image_index !== imageIndex) throw new ApiError(502, "MANIFEST_INVALID");
+  return parsed;
+}
+export async function putImageAnnotations(jobId: string, imageIndex: number, expectedRevision: number, completed: boolean, boxes: AnnotationBox[], signal?: AbortSignal): Promise<ImageAnnotations> {
+  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/images/${imageIndex}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: expectedRevision, completed, boxes }), signal });
+  const parsed = parseImageAnnotations(value);
+  if (!parsed || parsed.image_index !== imageIndex) throw new ApiError(502, "MANIFEST_INVALID");
+  return parsed;
+}
+export async function createAnnotationClass(jobId: string, expectedRevision: number, name: string, color: string, signal?: AbortSignal): Promise<{ revision: number; annotation_class: AnnotationClass }> {
+  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/classes`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: expectedRevision, name, color }), signal });
+  if (!isRecord(value) || !exactKeys(value, ["revision", "annotation_class"]) || !isSafeInteger(value.revision) || !isAnnotationClass(value.annotation_class)) throw new ApiError(502, "MANIFEST_INVALID");
+  return value as unknown as { revision: number; annotation_class: AnnotationClass };
+}
+export async function updateAnnotationClass(jobId: string, classId: string, expectedRevision: number, name: string, color: string, signal?: AbortSignal): Promise<{ revision: number; annotation_class: AnnotationClass }> {
+  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/classes/${encodeURIComponent(classId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: expectedRevision, name, color }), signal });
+  if (!isRecord(value) || !exactKeys(value, ["revision", "annotation_class"]) || !isSafeInteger(value.revision) || !isAnnotationClass(value.annotation_class)) throw new ApiError(502, "MANIFEST_INVALID");
+  return value as unknown as { revision: number; annotation_class: AnnotationClass };
+}
+export async function deleteAnnotationClass(jobId: string, classId: string, expectedRevision: number, signal?: AbortSignal): Promise<number> {
+  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/classes/${encodeURIComponent(classId)}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: expectedRevision }), signal });
+  if (!isRecord(value) || !exactKeys(value, ["revision", "annotation_class"]) || !isSafeInteger(value.revision) || value.annotation_class !== null) throw new ApiError(502, "MANIFEST_INVALID");
+  return value.revision as number;
 }

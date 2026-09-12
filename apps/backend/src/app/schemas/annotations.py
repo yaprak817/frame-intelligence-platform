@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StrictBool,
@@ -17,6 +18,7 @@ from pydantic import (
 
 COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+DECIMAL_PATTERN = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
 class StrictAnnotationModel(BaseModel):
@@ -71,6 +73,56 @@ class RevisionRequest(StrictAnnotationModel):
     expected_revision: Annotated[StrictInt, Field(ge=0)]
 
 
+def request_uuid(value: object) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str) or len(value) != 36:
+        raise ValueError("Invalid canonical UUID")
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        raise ValueError("Invalid canonical UUID") from None
+    if value != str(parsed):
+        raise ValueError("Invalid canonical UUID")
+    return parsed
+
+
+def request_decimal(value: object) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError("Invalid decimal")
+    if isinstance(value, Decimal):
+        parsed = value
+    elif isinstance(value, int):
+        parsed = Decimal(value)
+    elif isinstance(value, float):
+        parsed = Decimal(str(value))
+    elif (
+        isinstance(value, str)
+        and 0 < len(value) <= 64
+        and value == value.strip()
+        and DECIMAL_PATTERN.fullmatch(value)
+    ):
+        parsed = Decimal(value)
+    else:
+        raise ValueError("Invalid decimal")
+    if not parsed.is_finite():
+        raise ValueError("Invalid decimal")
+    return parsed
+
+
+RequestUUID = Annotated[UUID, BeforeValidator(request_uuid)]
+RequestCoordinate = Annotated[
+    Decimal,
+    BeforeValidator(request_decimal),
+    Field(ge=0, le=1, max_digits=9, decimal_places=8),
+]
+PositiveRequestCoordinate = Annotated[
+    Decimal,
+    BeforeValidator(request_decimal),
+    Field(gt=0, le=1, max_digits=9, decimal_places=8),
+]
+
+
 class CreateAnnotationClassRequest(RevisionRequest):
     name: Annotated[StrictStr, Field(min_length=1, max_length=160)]
     color: Annotated[StrictStr, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
@@ -90,19 +142,13 @@ class AnnotationClassMutationResponse(StrictAnnotationModel):
     annotation_class: AnnotationClassResponse | None
 
 
-Coordinate = Annotated[Decimal, Field(ge=0, le=1, max_digits=9, decimal_places=8)]
-PositiveCoordinate = Annotated[
-    Decimal, Field(gt=0, le=1, max_digits=9, decimal_places=8)
-]
-
-
 class AnnotationBoxInput(StrictAnnotationModel):
-    id: UUID
-    class_id: UUID
-    x_center: Coordinate
-    y_center: Coordinate
-    width: PositiveCoordinate
-    height: PositiveCoordinate
+    id: RequestUUID
+    class_id: RequestUUID
+    x_center: RequestCoordinate
+    y_center: RequestCoordinate
+    width: PositiveRequestCoordinate
+    height: PositiveRequestCoordinate
 
     @model_validator(mode="after")
     def contained(self):

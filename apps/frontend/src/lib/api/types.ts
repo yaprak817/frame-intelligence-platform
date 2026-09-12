@@ -108,3 +108,26 @@ export interface PublicDatasetManifest {
   summary: DatasetSummary; recommended_indices: number[]; images: DatasetImage[];
   accepted_download_url: string; yolo_download_url: string;
 }
+
+export interface AnnotationLimits {
+  max_classes: number;
+  max_boxes_per_image: number;
+  max_boxes_per_project: number;
+}
+export interface AnnotationClass {
+  id: string; yolo_index: number; name: string; color: string;
+}
+export interface AnnotationImageSummary {
+  index: number; filename: string; completed: boolean; box_count: number; preview_url: string;
+}
+export interface AnnotationProject {
+  id: string; job_id: string; revision: number; classes: AnnotationClass[];
+  images: AnnotationImageSummary[]; page: number; page_size: number;
+  total_images: number; limits: AnnotationLimits;
+}
+export interface AnnotationBox {
+  id: string; class_id: string; x_center: number; y_center: number; width: number; height: number;
+}
+export interface ImageAnnotations {
+  project_revision: number; image_index: number; completed: boolean; boxes: AnnotationBox[];
+}

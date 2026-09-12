@@ -15,6 +15,15 @@ const CODE_MESSAGES: Record<string, string> = {
   MANIFEST_INVALID: "Sonuç verisi güvenli biçimde doğrulanamadı.",
   ARTIFACT_NOT_FOUND: "İstenen sonuç karesi bulunamadı.",
   RATE_LIMITED: "Çok fazla istek gönderildi.",
+  ANNOTATION_REVISION_CONFLICT: "Etiketler başka bir oturumda değiştirildi.",
+  ANNOTATION_CLASS_IN_USE: "Bu sınıf kullanıldığı için silinemez.",
+  ANNOTATION_CLASS_ORDER_LOCKED: "Etiketleme başladıktan sonra sınıf sırası değiştirilemez.",
+  ANNOTATION_CLASS_INVALID: "Sınıf adı veya rengi geçersiz.",
+  ANNOTATION_LIMIT_EXCEEDED: "Etiketleme sınırına ulaşıldı.",
+  ANNOTATION_IMAGE_NOT_FOUND: "Etiketlenecek görsel bulunamadı.",
+  ANNOTATION_SOURCE_CHANGED: "Veri seti değişti. Sayfayı yenileyin.",
+  ANNOTATION_NOT_AVAILABLE: "Bu iş için etiketleme kullanılamıyor.",
+  ANNOTATION_STORAGE_UNAVAILABLE: "Etiketleme servisine şu anda ulaşılamıyor.",
 };
 
 const STATUS_MESSAGES: Record<number, string> = {
@@ -23,6 +32,7 @@ const STATUS_MESSAGES: Record<number, string> = {
   413: "Video izin verilen boyuttan büyük.",
   415: "Bu video biçimi desteklenmiyor.",
   422: "Lütfen form alanlarını kontrol edin.",
+  429: "Çok fazla istek gönderildi. Lütfen daha sonra tekrar deneyin.",
   502: "Sonuç servisine şu anda ulaşılamıyor. Lütfen yeniden deneyin.",
   503: "Hizmete şu anda ulaşılamıyor. Lütfen yeniden deneyin.",
 };

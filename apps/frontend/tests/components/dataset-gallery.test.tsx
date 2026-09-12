@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DatasetGallery } from "@/components/results/dataset-gallery";
 import { ResultView } from "@/components/results/result-view";
 
+const jobId = "11111111-1111-4111-8111-111111111111";
+
 const { getDatasetResult, getJobStatus } = vi.hoisted(() => ({
   getDatasetResult: vi.fn(),
   getJobStatus: vi.fn(),
@@ -102,6 +104,8 @@ describe("dataset result gallery", () => {
     });
     render(<ResultView jobId="11111111-1111-4111-8111-111111111111" />);
     expect(await screen.findByText(expected)).toBeVisible();
+    if (sourceType === "IMAGE_DATASET") expect(screen.getByRole("link", { name: "Etiketlemeye başla" })).toHaveAttribute("href", `/jobs/${jobId}/annotations`);
+    else expect(screen.queryByRole("link", { name: "Etiketlemeye başla" })).not.toBeInTheDocument();
   });
 
   it("rejects a source and result discriminator mismatch", async () => {
