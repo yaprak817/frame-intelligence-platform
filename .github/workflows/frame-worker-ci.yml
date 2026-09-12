@@ -105,7 +105,7 @@ jobs:
           -p 9000:9000
           -e MINIO_ROOT_USER=frame_admin
           -e MINIO_ROOT_PASSWORD=test_password
-          minio/minio:latest server /data
+          quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
       - name: Wait for MinIO
         run: |
           for attempt in {1..30}; do
@@ -176,7 +176,7 @@ jobs:
           -p 9000:9000
           -e MINIO_ROOT_USER=frame_admin
           -e MINIO_ROOT_PASSWORD=test_password
-          minio/minio:latest server /data
+          quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
       - name: Wait for task-scoped MinIO
         run: |
           for attempt in {1..30}; do

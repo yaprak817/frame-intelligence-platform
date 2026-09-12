@@ -24,6 +24,12 @@ test("dataset result opens annotation workspace and persists a box", async ({ pa
 
   await page.goto(`/jobs/${jobId}/result`);
   await page.getByRole("link", { name: "Etiketlemeye başla" }).click();
+  await expect(page.getByRole("heading", { name: "Frame ve görsel galerisi" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /^0\.jpg/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /^1\.jpg/ })).toBeVisible();
+  await expect(page.getByLabel("Bounding box çalışma alanı")).toHaveCount(0);
+  await page.getByRole("link", { name: /^0\.jpg/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/jobs/${jobId}/annotations/0$`));
   const canvas = page.getByLabel("Bounding box çalışma alanı");
   await expect(canvas).toBeVisible();
   const bounds = await canvas.boundingBox();
