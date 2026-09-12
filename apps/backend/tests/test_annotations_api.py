@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from io import BytesIO
 from uuid import uuid4
 
@@ -9,9 +10,11 @@ from app.api.dependencies import get_annotation_service
 from app.main import app
 from app.models.annotations import AnnotationProject
 from app.schemas.annotations import (
+    AnnotationBoxResponse,
     AnnotationImageSummary,
     AnnotationLimits,
     AnnotationProjectResponse,
+    ImageAnnotationsResponse,
 )
 from app.services.annotations import AnnotationClassInvalid, AnnotationRevisionConflict
 from app.services.result_artifacts import ManifestInvalidError
@@ -68,7 +71,43 @@ class FakeAnnotationService:
         )
 
     async def put_image(self, project, image_index, request):
-        raise self.put_error
+        if self.put_error is not None:
+            raise self.put_error
+        project.revision += 1
+        return ImageAnnotationsResponse(
+            project_revision=project.revision,
+            image_index=image_index,
+            completed=request.completed,
+            boxes=[
+                AnnotationBoxResponse(
+                    id=box.id,
+                    class_id=box.class_id,
+                    x_center=box.x_center,
+                    y_center=box.y_center,
+                    width=box.width,
+                    height=box.height,
+                )
+                for box in request.boxes
+            ],
+        )
+
+    async def image(self, project, image_index):
+        assert image_index == 0
+        return ImageAnnotationsResponse(
+            project_revision=project.revision,
+            image_index=image_index,
+            completed=True,
+            boxes=[
+                AnnotationBoxResponse(
+                    id=uuid4(),
+                    class_id=uuid4(),
+                    x_center=Decimal("0.5"),
+                    y_center=Decimal("5e-1"),
+                    width=Decimal("0.25"),
+                    height=Decimal("2.5e-1"),
+                )
+            ],
+        )
 
     async def preview(self, project, image_index):
         assert image_index == 0
@@ -121,6 +160,107 @@ def test_strict_put_and_conflict_are_safe(annotation_client) -> None:
     assert invalid.status_code == 422
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["code"] == "ANNOTATION_REVISION_CONFLICT"
+
+
+def test_non_empty_frontend_json_box_is_bound_and_returned(annotation_client) -> None:
+    client, service = annotation_client
+    service.put_error = None
+    box_id, class_id = uuid4(), uuid4()
+    response = client.put(
+        f"/api/v1/jobs/{service.project.job_id}/annotations/images/0",
+        json={
+            "expected_revision": 0,
+            "completed": True,
+            "boxes": [
+                {
+                    "id": str(box_id),
+                    "class_id": str(class_id),
+                    "x_center": 0.5,
+                    "y_center": 0.5,
+                    "width": 0.2,
+                    "height": 0.2,
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "project_revision": 1,
+        "image_index": 0,
+        "completed": True,
+        "boxes": [
+            {
+                "id": str(box_id),
+                "class_id": str(class_id),
+                "x_center": "0.5",
+                "y_center": "0.5",
+                "width": "0.2",
+                "height": "0.2",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", "11111111-1111-4111-8111-11111111111Z"),
+        ("id", "11111111-1111-4111-8111-111111111111 "),
+        ("x_center", True),
+        ("x_center", " 0.5"),
+        ("x_center", "NaN"),
+        ("x_center", "Infinity"),
+        ("x_center", "0x1"),
+        ("x_center", "0.5tail"),
+        ("x_center", "1" * 65),
+        ("width", 0),
+    ],
+)
+def test_invalid_frontend_box_values_are_safe_422(
+    annotation_client, field, value
+) -> None:
+    client, service = annotation_client
+    service.put_error = None
+    box = {
+        "id": str(uuid4()),
+        "class_id": str(uuid4()),
+        "x_center": 0.5,
+        "y_center": 0.5,
+        "width": 0.2,
+        "height": 0.2,
+    }
+    box[field] = value
+    response = client.put(
+        f"/api/v1/jobs/{service.project.job_id}/annotations/images/0",
+        json={"expected_revision": 0, "completed": True, "boxes": [box]},
+    )
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "code": "VALIDATION_ERROR",
+            "message": "Request validation failed",
+        }
+    }
+    assert str(value) not in response.text
+
+
+def test_non_empty_box_response_uses_public_decimal_json_contract(
+    annotation_client,
+) -> None:
+    client, service = annotation_client
+    response = client.get(f"/api/v1/jobs/{service.project.job_id}/annotations/images/0")
+    assert response.status_code == 200
+    box = response.json()["boxes"][0]
+    assert {key: box[key] for key in ("x_center", "y_center", "width", "height")} == {
+        "x_center": "0.5",
+        "y_center": "0.5",
+        "width": "0.25",
+        "height": "0.25",
+    }
+    assert not any(
+        secret in response.text
+        for secret in ("result_run_token", "object_key", "bucket", "s3://")
+    )
 
 
 def test_preview_is_same_origin_stream_with_safe_headers(annotation_client) -> None:

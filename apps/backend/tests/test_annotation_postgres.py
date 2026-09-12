@@ -214,19 +214,21 @@ async def exercise_postgres_concurrency() -> None:
             left_box, right_box = uuid4(), uuid4()
 
             def request(box_id):
-                return PutImageAnnotationsRequest(
-                    expected_revision=1,
-                    completed=True,
-                    boxes=[
-                        {
-                            "id": box_id,
-                            "class_id": class_id,
-                            "x_center": Decimal("0.5"),
-                            "y_center": Decimal("0.5"),
-                            "width": Decimal("0.2"),
-                            "height": Decimal("0.2"),
-                        }
-                    ],
+                return PutImageAnnotationsRequest.model_validate(
+                    {
+                        "expected_revision": 1,
+                        "completed": True,
+                        "boxes": [
+                            {
+                                "id": str(box_id),
+                                "class_id": str(class_id),
+                                "x_center": 0.5,
+                                "y_center": 0.5,
+                                "width": 0.2,
+                                "height": 0.2,
+                            }
+                        ],
+                    }
                 )
 
             outcomes = await asyncio.gather(
@@ -253,6 +255,8 @@ async def exercise_postgres_concurrency() -> None:
             )
             assert persisted is not None and persisted.revision == 2
             assert len(boxes) == 1
+            image = await session.get(AnnotationImage, (project_id, 0))
+            assert image is not None and image.completed is True
             assert boxes[0].id == winner.boxes[0].id
             original_box_id = boxes[0].id
 

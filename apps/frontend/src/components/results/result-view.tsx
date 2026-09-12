@@ -33,5 +33,5 @@ function ResolvedResultView({ jobId, downloadError }: { jobId: string; downloadE
   }, [jobId]);
   if (error) return <main className="page-shell"><div className="alert error" role="alert">Sonuç türü doğrulanamadı.</div></main>;
   if (dataset === null) return <main className="page-shell"><div className="status-message" role="status">Sonuç türü alınıyor…</div></main>;
-  return dataset ? <DatasetGallery jobId={jobId} initialDownloadError={downloadError} /> : <ResultGallery jobId={jobId} />;
+  return dataset ? <><div className="annotation-entry"><a className="button primary" href={`/jobs/${encodeURIComponent(jobId)}/annotations`}>Etiketlemeye başla</a></div><DatasetGallery jobId={jobId} initialDownloadError={downloadError} /></> : <ResultGallery jobId={jobId} />;
 }

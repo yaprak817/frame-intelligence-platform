@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GET, POST } from "@/app/api/v1/[...path]/route";
+import { DELETE, GET, PATCH, POST, PUT } from "@/app/api/v1/[...path]/route";
+import { createAnnotationClass, getImageAnnotations, getOrCreateAnnotationProject, putImageAnnotations } from "@/lib/api/client";
 
 const context = (path: string[]) => ({ params: Promise.resolve({ path }) });
 const HMAC_VECTOR_SECRET = "fixture-only-proxy-secret-0123456789-DO-NOT-USE";
@@ -16,6 +17,17 @@ describe("streaming API route proxy", () => {
     delete process.env.INTERNAL_PROXY_SHARED_SECRET;
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it.each([["PUT", PUT], ["PATCH", PATCH], ["DELETE", DELETE]] as const)("forwards annotation %s mutations", async (method, handler) => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    const upstream = vi.fn().mockResolvedValue(new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", upstream);
+    const request = new NextRequest("http://frontend/api/v1/jobs/1/annotations/images/0", { method, body: "{}", headers: { "Content-Type": "application/json" } });
+    const response = await handler(request, context(["jobs", "1", "annotations", "images", "0"]));
+    expect(response.status).toBe(200);
+    expect((upstream.mock.calls[0][1] as RequestInit).method).toBe(method);
+    expect((upstream.mock.calls[0][1] as RequestInit).body).toBe(request.body);
   });
 
   it("uses the separately bounded upload timeout without buffering the body", async () => {
@@ -218,4 +230,49 @@ describe("streaming API route proxy", () => {
     expect(response.status).toBe(400);
     expect(upstream).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["class id", { classes: [{ id: "22222222-2222-4222-8222-222222222222", yolo_index: 0, name: "Araç", color: "#ff0000" }, { id: "22222222-2222-4222-8222-222222222222", yolo_index: 1, name: "İnsan", color: "#00ff00" }] }],
+    ["YOLO index", { classes: [{ id: "22222222-2222-4222-8222-222222222222", yolo_index: 0, name: "Araç", color: "#ff0000" }, { id: "33333333-3333-4333-8333-333333333333", yolo_index: 0, name: "İnsan", color: "#00ff00" }] }],
+    ["normalized class name", { classes: [{ id: "22222222-2222-4222-8222-222222222222", yolo_index: 0, name: "Straße", color: "#ff0000" }, { id: "33333333-3333-4333-8333-333333333333", yolo_index: 1, name: "STRASSE", color: "#00ff00" }] }],
+    ["image index", { images: [{ index: 4, filename: "one.jpg", completed: false, box_count: 0, preview_url: "/api/v1/jobs/11111111-1111-4111-8111-111111111111/annotations/images/4/preview" }, { index: 4, filename: "two.jpg", completed: false, box_count: 0, preview_url: "/api/v1/jobs/11111111-1111-4111-8111-111111111111/annotations/images/4/preview" }], total_images: 2 }],
+  ])("rejects duplicate annotation response identity: %s", async (_label, override) => {
+    const base = { id: "33333333-3333-4333-8333-333333333333", job_id: "11111111-1111-4111-8111-111111111111", revision: 1, classes: [{ id: "22222222-2222-4222-8222-222222222222", yolo_index: 0, name: "Araç", color: "#ff0000" }], images: [{ index: 4, filename: "one.jpg", completed: false, box_count: 0, preview_url: "/api/v1/jobs/11111111-1111-4111-8111-111111111111/annotations/images/4/preview" }], page: 1, page_size: 100, total_images: 1, limits: { max_classes: 100, max_boxes_per_image: 200, max_boxes_per_project: 50000 } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...base, ...override }), { status: 200 })));
+    await expect(getOrCreateAnnotationProject(base.job_id)).rejects.toMatchObject({ status: 502, code: "MANIFEST_INVALID" });
+  });
+
+  it("rejects duplicate box ids and forwards mutation AbortSignal", async () => {
+    const box = { id: "44444444-4444-4444-8444-444444444444", class_id: "22222222-2222-4222-8222-222222222222", x_center: .5, y_center: .5, width: .2, height: .2 };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ project_revision: 1, image_index: 4, completed: true, boxes: [box, box] }), { status: 200 })));
+    await expect(getImageAnnotations("11111111-1111-4111-8111-111111111111", 4)).rejects.toMatchObject({ status: 502, code: "MANIFEST_INVALID" });
+    const controller = new AbortController();
+    const upstream = vi.fn().mockResolvedValue(new Response(JSON.stringify({ revision: 2, annotation_class: { id: "55555555-5555-4555-8555-555555555555", yolo_index: 1, name: "İnsan", color: "#00ff00" } }), { status: 200 }));
+    vi.stubGlobal("fetch", upstream);
+    await createAnnotationClass("11111111-1111-4111-8111-111111111111", 1, "İnsan", "#00ff00", controller.signal);
+    expect((upstream.mock.calls[0][1] as RequestInit).signal).toBe(controller.signal);
+  });
+
+  it("normalizes backend decimal strings and saves finite JSON numbers", async () => {
+    const box = { id: "44444444-4444-4444-8444-444444444444", class_id: "22222222-2222-4222-8222-222222222222", x_center: "5e-1", y_center: "0.50", width: "2e-1", height: "0.2" };
+    const upstream = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ project_revision: 1, image_index: 4, completed: true, boxes: [box] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ project_revision: 2, image_index: 4, completed: true, boxes: [box] }), { status: 200 }));
+    vi.stubGlobal("fetch", upstream);
+    const parsed = await getImageAnnotations("11111111-1111-4111-8111-111111111111", 4);
+    expect(parsed.boxes[0]).toMatchObject({ x_center: .5, y_center: .5, width: .2, height: .2 });
+    await putImageAnnotations("11111111-1111-4111-8111-111111111111", 4, 1, true, parsed.boxes);
+    const payload = JSON.parse(String((upstream.mock.calls[1][1] as RequestInit).body));
+    expect(payload.boxes[0]).toMatchObject({ x_center: .5, y_center: .5, width: .2, height: .2 });
+    expect(Object.values(payload.boxes[0]).filter((value) => typeof value === "number").every(Number.isFinite)).toBe(true);
+  });
+
+  it.each(["", " 0.5", "0.5 ", "NaN", "Infinity", "0x10", "0.5x", "1".repeat(65), true, null, {}, [], "1.1", "-0.1"])(
+    "rejects an invalid annotation decimal coordinate: %j",
+    async (coordinate) => {
+      const box = { id: "44444444-4444-4444-8444-444444444444", class_id: "22222222-2222-4222-8222-222222222222", x_center: coordinate, y_center: .5, width: .2, height: .2 };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ project_revision: 1, image_index: 4, completed: true, boxes: [box] }), { status: 200 })));
+      await expect(getImageAnnotations("11111111-1111-4111-8111-111111111111", 4)).rejects.toMatchObject({ status: 502, code: "MANIFEST_INVALID" });
+    },
+  );
 });
