@@ -44,7 +44,7 @@ export function AnnotationGallery({ jobId }: { jobId: string }) {
     </div>
     {visible.length === 0 ? <div className="status-message">Bu filtrede görsel bulunamadı.</div> : <div className="annotation-card-grid">{visible.map((item) => <a className="annotation-card" key={item.index} href={`/jobs/${encodeURIComponent(jobId)}/annotations/${item.index}`}>
       <img src={item.preview_url} alt={item.filename} loading="lazy" />
-      <div><strong>{item.filename}</strong><span>Index {item.index}</span><span>{item.box_count} kutu</span><span className={`annotation-status ${item.completed ? "manual" : "unlabelled"}`}>{item.completed ? "MANUEL ETİKETLENDİ" : "ETİKETLENMEDİ"}</span></div>
+      <div><strong>{item.filename}</strong><span>Index {item.index}</span>{item.timestamp_ms !== null && <span>{(item.timestamp_ms / 1000).toFixed(3)} sn</span>}<span>{item.width}×{item.height}</span><span>{item.box_count} kutu</span><span className={`annotation-status ${item.completed ? "manual" : "unlabelled"}`}>{item.completed ? "MANUEL ETİKETLENDİ" : "ETİKETLENMEDİ"}</span></div>
     </a>)}</div>}
     <nav className="annotation-pagination" aria-label="Galeri sayfaları"><button className="button secondary" disabled={safePage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Önceki sayfa</button><span>{safePage} / {pages}</span><button className="button secondary" disabled={safePage === pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>Sonraki sayfa</button></nav>
   </main>;

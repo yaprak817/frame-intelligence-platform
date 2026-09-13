@@ -96,7 +96,7 @@ progress { width:100%; height:.7rem; accent-color:var(--green); }
 .class-select { display:flex; align-items:center; gap:.5rem; text-align:left; font-weight:750; }
 .class-select span { flex:0 0 auto; width:1rem; height:1rem; border-radius:50%; }
 .image-title { display:flex; justify-content:space-between; gap:1rem; margin-bottom:.75rem; overflow-wrap:anywhere; }
-.annotation-canvas { position:relative; width:min(100%,640px); aspect-ratio:1; margin:auto; overflow:hidden; background:#252a28; touch-action:none; user-select:none; }
+.annotation-canvas { position:relative; width:min(100%,640px); margin:auto; overflow:hidden; background:#252a28; touch-action:none; user-select:none; }
 .annotation-canvas img,.annotation-canvas svg { position:absolute; inset:0; display:block; width:100%; height:100%; }
 .annotation-canvas img { object-fit:fill; }
 .annotation-canvas svg { z-index:2; cursor:crosshair; }

@@ -17,8 +17,8 @@ const project = {
   id: "33333333-3333-4333-8333-333333333333", job_id: jobId, revision: 2,
   classes: [{ id: classId, yolo_index: 0, name: "Araç", color: "#ff0000" }],
   images: [
-    { index: 4, filename: "one.jpg", completed: true, box_count: 1, preview_url: `/api/v1/jobs/${jobId}/annotations/images/4/preview` },
-    { index: 9, filename: "two.jpg", completed: false, box_count: 0, preview_url: `/api/v1/jobs/${jobId}/annotations/images/9/preview` },
+    { index: 4, filename: "one.jpg", width: 640, height: 640, timestamp_ms: null, completed: true, box_count: 1, preview_url: `/api/v1/jobs/${jobId}/annotations/images/4/preview` },
+    { index: 9, filename: "two.jpg", width: 640, height: 640, timestamp_ms: null, completed: false, box_count: 0, preview_url: `/api/v1/jobs/${jobId}/annotations/images/9/preview` },
   ], page: 1, page_size: 100, total_images: 2,
   limits: { max_classes: 100, max_boxes_per_image: 200, max_boxes_per_project: 50_000 },
 };
@@ -55,6 +55,24 @@ describe("annotation workspace", () => {
     const payload = api.putImageAnnotations.mock.calls[0][4];
     expect(payload).toHaveLength(2);
     expect(payload[1]).toMatchObject({ x_center: .9, y_center: .9, width: .2, height: .2 });
+  });
+
+  it("uses verified non-square video dimensions without letterboxing", async () => {
+    api.getOrCreateAnnotationProject.mockResolvedValue({
+      ...project,
+      images: [{ ...project.images[0], width: 1280, height: 720, timestamp_ms: 1250 }],
+      total_images: 1,
+    });
+    render(<AnnotationWorkspace jobId={jobId} />);
+    const canvas = await readyCanvas(1280, 720) as SVGSVGElement;
+    expect(canvas.parentElement).toHaveStyle({ aspectRatio: "1280 / 720" });
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 320, height: 180, right: 320, bottom: 180, x: 0, y: 0, toJSON: () => ({}) });
+    fireEvent.pointerDown(canvas, { pointerId: 31, button: 0, clientX: 80, clientY: 45 });
+    fireEvent.pointerMove(canvas, { pointerId: 31, clientX: 240, clientY: 135 });
+    fireEvent.pointerUp(canvas, { pointerId: 31 });
+    fireEvent.click(screen.getByRole("button", { name: "Kaydet" }));
+    await waitFor(() => expect(api.putImageAnnotations).toHaveBeenCalledOnce());
+    expect(api.putImageAnnotations.mock.calls[0][4][1]).toMatchObject({ x_center: .5, y_center: .5, width: .5, height: .5 });
   });
 
   it("blocks drawing without an active class and guards dirty navigation", async () => {
@@ -210,7 +228,7 @@ describe("annotation workspace", () => {
   it.each([[1280, 720], [640, 639], [639, 640]])("fails closed for an invalid %sx%s preview", async (width, height) => {
     render(<AnnotationWorkspace jobId={jobId} />);
     expect(await readyCanvas(width, height)).toBeNull();
-    expect(screen.getByRole("alert")).toHaveTextContent("640×640");
+    expect(screen.getByRole("alert")).toHaveTextContent("boyutları doğrulanmış önizleme bilgisiyle eşleşmiyor");
     expect(screen.getByRole("button", { name: "Kaydet" })).toBeDisabled();
   });
 

@@ -250,7 +250,7 @@ const parseAnnotationBox = (value: unknown): AnnotationBox | null => {
 };
 function isAnnotationProject(value: unknown): value is AnnotationProject {
   if (!isRecord(value) || !exactKeys(value, ["id", "job_id", "revision", "classes", "images", "page", "page_size", "total_images", "limits"]) || typeof value.id !== "string" || !ANNOTATION_UUID.test(value.id) || typeof value.job_id !== "string" || !ANNOTATION_UUID.test(value.job_id) || !isSafeInteger(value.revision) || !Array.isArray(value.classes) || !value.classes.every(isAnnotationClass) || !Array.isArray(value.images) || !isSafeInteger(value.page, 1) || !isSafeInteger(value.page_size, 1) || !isSafeInteger(value.total_images)) return false;
-  if (!value.images.every((item) => isRecord(item) && exactKeys(item, ["index", "filename", "completed", "box_count", "preview_url"]) && isSafeInteger(item.index) && typeof item.filename === "string" && typeof item.completed === "boolean" && isSafeInteger(item.box_count) && isSafeRelativePath(item.preview_url))) return false;
+  if (!value.images.every((item) => isRecord(item) && exactKeys(item, ["index", "filename", "width", "height", "timestamp_ms", "completed", "box_count", "preview_url"]) && isSafeInteger(item.index) && typeof item.filename === "string" && isSafeInteger(item.width, 1) && isSafeInteger(item.height, 1) && (item.timestamp_ms === null || isSafeInteger(item.timestamp_ms)) && typeof item.completed === "boolean" && isSafeInteger(item.box_count) && isSafeRelativePath(item.preview_url))) return false;
   const classes = value.classes as AnnotationClass[];
   const images = value.images as AnnotationProject["images"];
   if (new Set(classes.map((item) => item.id.toLowerCase())).size !== classes.length ||

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from PIL import Image
 
 from app.api.dependencies import get_result_artifact_service
 from app.domain.jobs import JobStatus
@@ -206,6 +207,56 @@ def _manifest(job: ProcessingJob, *, count: int = 1) -> bytes:
             "frames": frames,
         }
     ).encode()
+
+
+def test_video_annotation_preview_streams_verified_non_square_frame_and_cleans(
+    tmp_path,
+) -> None:
+    job = _job(uuid4())
+    output = io.BytesIO()
+    Image.new("RGB", (640, 360), color=(10, 20, 30)).save(output, format="JPEG")
+    frame_payload = output.getvalue()
+    manifest = json.loads(_manifest(job))
+    frame = manifest["frames"][0]
+    frame["size_bytes"] = len(frame_payload)
+    frame["sha256"] = hashlib.sha256(frame_payload).hexdigest()
+    frame["width"] = 640
+    frame["height"] = 360
+    frame["filename"] = frame["filename"].replace("640x480", "640x360")
+    frame["object_key"] = frame["object_key"].replace("640x480", "640x360")
+    storage = FakeResultStorage()
+    storage.payload = json.dumps(manifest).encode()
+    body = io.BytesIO(frame_payload)
+
+    async def open_stream(object_key: str) -> ObjectStream:
+        assert object_key == frame["object_key"]
+        return ObjectStream(body, ObjectMetadata(len(frame_payload), "image/jpeg"))
+
+    storage.open_stream = open_stream  # type: ignore[attr-defined]
+    service = ResultArtifactService(
+        type("Repository", (), {"get": lambda _self, _job_id: None})(),
+        storage,
+        300,
+        spool_min_free_bytes=0,
+        spool_root=str(tmp_path),
+    )
+
+    async def get_job(_job_id):
+        return job
+
+    service._repository.get = get_job
+    run_token = uuid4()
+    run_token = type(run_token)(job.result_reference.split("/")[-2])
+    stream = asyncio.run(service.annotation_preview(job.id, run_token, 0))
+    received = asyncio.run(_consume(stream))
+
+    assert received == frame_payload
+    assert body.closed
+    assert list(tmp_path.iterdir()) == []
+
+
+async def _consume(stream: ObjectStream) -> bytes:
+    return b"".join([chunk async for chunk in stream.chunks()])
 
 
 @pytest.fixture

@@ -52,6 +52,9 @@ class AnnotationClassResponse(StrictAnnotationModel):
 class AnnotationImageSummary(StrictAnnotationModel):
     index: StrictInt
     filename: StrictStr
+    width: StrictInt
+    height: StrictInt
+    timestamp_ms: StrictInt | None
     completed: StrictBool
     box_count: StrictInt
     preview_url: StrictStr

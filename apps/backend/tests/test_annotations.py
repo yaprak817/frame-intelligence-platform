@@ -136,6 +136,9 @@ def _valid_public_responses():
             {
                 "index": 0,
                 "filename": "safe.jpg",
+                "width": 640,
+                "height": 360,
+                "timestamp_ms": 1250,
                 "completed": False,
                 "box_count": 0,
                 "preview_url": "/api/v1/preview",
@@ -226,6 +229,9 @@ def test_public_response_models_reject_internal_fields(internal_field) -> None:
             {
                 "index": 0,
                 "filename": "safe.jpg",
+                "width": 640,
+                "height": 360,
+                "timestamp_ms": 1250,
                 "completed": False,
                 "box_count": 0,
                 "preview_url": "/preview",
@@ -260,8 +266,6 @@ def test_public_response_models_accept_valid_api_values() -> None:
         (JobStatus.QUEUED, SourceType.IMAGE_DATASET),
         (JobStatus.RUNNING, SourceType.IMAGE_DATASET),
         (JobStatus.FAILED, SourceType.IMAGE_DATASET),
-        (JobStatus.SUCCEEDED, SourceType.URL),
-        (JobStatus.SUCCEEDED, SourceType.UPLOAD),
     ],
 )
 def test_annotation_project_creation_rejects_ineligible_jobs_before_db_mutation(

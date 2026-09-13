@@ -53,6 +53,9 @@ class FakeAnnotationService:
                 AnnotationImageSummary(
                     index=0,
                     filename="safe.jpg",
+                    width=640,
+                    height=360,
+                    timestamp_ms=1250,
                     completed=False,
                     box_count=0,
                     preview_url=(

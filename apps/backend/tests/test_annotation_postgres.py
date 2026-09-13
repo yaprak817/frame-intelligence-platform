@@ -22,7 +22,7 @@ from app.schemas.annotations import (
     CreateAnnotationClassRequest,
     PutImageAnnotationsRequest,
 )
-from app.schemas.artifacts import StoredDatasetManifestV1
+from app.schemas.artifacts import StoredDatasetManifestV1, StoredManifestV1
 from app.services.annotations import (
     AnnotationClassInUse,
     AnnotationClassInvalid,
@@ -105,6 +105,41 @@ def manifest(job_id, run_token) -> StoredDatasetManifestV1:
                 "accepted": {"object_key": "safe", "size_bytes": 1, "sha256": digest},
                 "yolo": {"object_key": "safe", "size_bytes": 1, "sha256": digest},
             },
+        }
+    )
+
+
+def video_manifest(job_id, run_token) -> StoredManifestV1:
+    filename = "frame_000000_1250ms_640x360.jpg"
+    return StoredManifestV1.model_validate(
+        {
+            "schema_version": 1,
+            "job_id": job_id,
+            "run_token": run_token,
+            "created_at": datetime.now(UTC),
+            "summary": {
+                "frames_saved": 1,
+                "candidates": 1,
+                "shortlisted": 1,
+                "duplicates_removed": 0,
+                "processing_seconds": 1.0,
+                "duration_seconds": 2.0,
+            },
+            "frames": [
+                {
+                    "index": 0,
+                    "filename": filename,
+                    "object_key": (
+                        f"jobs/{job_id}/results/{run_token}/frames/{filename}"
+                    ),
+                    "content_type": "image/jpeg",
+                    "size_bytes": 100,
+                    "sha256": "c" * 64,
+                    "timestamp_ms": 1250,
+                    "width": 640,
+                    "height": 360,
+                }
+            ],
         }
     )
 
@@ -459,3 +494,84 @@ def test_real_postgres_create_and_revision_conflict() -> None:
             runner.run(exercise_postgres_concurrency())
     else:
         asyncio.run(exercise_postgres_concurrency())
+
+
+async def exercise_video_sources() -> None:
+    assert TEST_DATABASE_URL is not None
+    engine = create_async_engine(TEST_DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    job_ids = []
+    try:
+        for source_type in (SourceType.UPLOAD, SourceType.URL):
+            job_id, run_token = uuid4(), uuid4()
+            job_ids.append(job_id)
+            item = job(job_id, run_token)
+            item.source_type = source_type
+            item.source_display = (
+                "clip.mp4"
+                if source_type is SourceType.UPLOAD
+                else "https://example.test/clip.mp4"
+            )
+            if source_type is SourceType.URL:
+                item.source_secret = "encrypted-url-fixture"
+                item.source_reference = None
+            document = video_manifest(job_id, run_token)
+            results = FakeResults(item, document)
+            async with sessions() as session:
+                session.add(item)
+                await session.commit()
+                service = AnnotationService(session, results)
+                project, created = await service.get_or_create(job_id)
+                assert created
+                response = await service.response(project, 1, 50)
+                assert response.total_images == 1
+                assert response.images[0].width == 640
+                assert response.images[0].height == 360
+                assert response.images[0].timestamp_ms == 1250
+                created_class = await service.create_class(
+                    project,
+                    CreateAnnotationClassRequest(
+                        expected_revision=0, name="vehicle", color="#123456"
+                    ),
+                )
+                assert created_class.annotation_class is not None
+                saved = await service.put_image(
+                    project,
+                    0,
+                    PutImageAnnotationsRequest.model_validate(
+                        {
+                            "expected_revision": 1,
+                            "completed": True,
+                            "boxes": [
+                                {
+                                    "id": str(uuid4()),
+                                    "class_id": str(created_class.annotation_class.id),
+                                    "x_center": 0.5,
+                                    "y_center": 0.5,
+                                    "width": 0.25,
+                                    "height": 0.5,
+                                }
+                            ],
+                        }
+                    ),
+                )
+                assert (
+                    saved.project_revision == 2
+                    and saved.completed
+                    and len(saved.boxes) == 1
+                )
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                sa.delete(ProcessingJob).where(ProcessingJob.id.in_(job_ids))
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+def test_real_postgres_video_upload_and_url_persist_annotations() -> None:
+    if sys.platform == "win32":
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            runner.run(exercise_video_sources())
+    else:
+        asyncio.run(exercise_video_sources())
