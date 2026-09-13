@@ -79,6 +79,66 @@ function verifyRedaction() {
   console.log("Tanı redaksiyonu sahte örneklerle doğrulandı.");
 }
 
+function requestCategory(url, resourceType) {
+  const parsed = new URL(url);
+  if (/^\/api\/v1\/(?:jobs\/[^/]+\/)?annotations(?:\/|$)/.test(parsed.pathname)) return "annotation-api";
+  if (parsed.pathname.startsWith("/_next/")) return "next-asset";
+  if (resourceType === "document") return "document";
+  return "other";
+}
+
+function assertSameOriginRequests(requests, expectedOrigin) {
+  const safeRecords = [];
+  const seen = new Set();
+  for (const request of requests) {
+    const origin = new URL(request.url).origin;
+    if (origin === expectedOrigin) continue;
+    const record = {
+      origin,
+      expectedOrigin,
+      resourceType: request.resourceType,
+      navigation: request.isNavigationRequest,
+      frame: request.isMainFrame ? "main-frame" : "subframe",
+      category: request.isInitialNavigation ? "initial-navigation-redirect" : requestCategory(request.url, request.resourceType),
+    };
+    const key = JSON.stringify(record);
+    if (!seen.has(key) && safeRecords.length < 10) {
+      seen.add(key);
+      safeRecords.push(record);
+    }
+  }
+  if (safeRecords.length > 0) {
+    throw new Error(`Annotation akışında cross-origin istek bulundu. Güvenli tanı: ${JSON.stringify(safeRecords)}`);
+  }
+}
+
+function verifySameOriginAssertion() {
+  const expectedOrigin = "http://127.0.0.1:3000";
+  assertSameOriginRequests([{ url: `${expectedOrigin}/api/v1/annotations/projects`, resourceType: "fetch", isNavigationRequest: false, isMainFrame: true, isInitialNavigation: false }], expectedOrigin);
+  const measurementWindow = [{ url: "http://storage.example.test/stale-result-request", resourceType: "image", isNavigationRequest: false, isMainFrame: true, isInitialNavigation: false }];
+  measurementWindow.length = 0;
+  measurementWindow.push({ url: `${expectedOrigin}/api/v1/annotations/projects`, resourceType: "fetch", isNavigationRequest: false, isMainFrame: true, isInitialNavigation: false });
+  assertSameOriginRequests(measurementWindow, expectedOrigin);
+  let rejected = false;
+  try {
+    assertSameOriginRequests([{ url: "http://storage.example.test/private/frame.jpg", resourceType: "image", isNavigationRequest: false, isMainFrame: true, isInitialNavigation: false }], expectedOrigin);
+  } catch (error) {
+    rejected = error instanceof Error
+      && error.message.startsWith("Annotation akışında cross-origin istek bulundu.")
+      && error.message.includes('"origin":"http://storage.example.test"')
+      && !error.message.includes("/private/frame.jpg");
+  }
+  if (!rejected) throw new Error("Cross-origin negatif kontrolü kasıtlı isteği reddetmedi.");
+  let redirectClassified = false;
+  try {
+    assertSameOriginRequests([{ url: "http://localhost:3000/annotation", resourceType: "document", isNavigationRequest: true, isMainFrame: true, isInitialNavigation: true }], expectedOrigin);
+  } catch (error) {
+    redirectClassified = error instanceof Error && error.message.includes('"category":"initial-navigation-redirect"');
+  }
+  if (!redirectClassified) throw new Error("Başlangıç navigation/redirect isteği ayrı sınıflandırılmadı.");
+  console.log("Annotation same-origin assertion pozitif ve negatif örneklerle doğrulandı.");
+}
+
 function run(command, args, { env, timeoutMs = 120_000, capture = true, allowFailure = false } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(command, args, {
@@ -305,11 +365,29 @@ async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeig
   const context = await browser.newContext();
   const page = await context.newPage();
   const requested = [];
-  page.on("request", (request) => requested.push(request.url()));
+  let requestListener;
   try {
     await page.goto(`${baseUrl}/jobs/${jobId}/result`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await page.waitForLoadState("networkidle", { timeout: 30_000 });
+    requested.length = 0;
+    let initialNavigationSeen = false;
+    requestListener = (request) => {
+      const isNavigationRequest = request.isNavigationRequest();
+      const isMainFrame = request.frame() === page.mainFrame();
+      const isInitialNavigation = isNavigationRequest && isMainFrame && !initialNavigationSeen;
+      if (isInitialNavigation) initialNavigationSeen = true;
+      requested.push({
+        url: request.url(),
+        resourceType: request.resourceType(),
+        isNavigationRequest,
+        isMainFrame,
+        isInitialNavigation,
+      });
+    };
+    page.on("request", requestListener);
     await page.getByRole("link", { name: "Etiketlemeye başla" }).click();
     await page.getByRole("heading", { name: "Frame ve görsel galerisi" }).waitFor({ state: "visible", timeout: 30_000 });
+    const expectedOrigin = new URL(page.url()).origin;
     const firstCard = page.locator("a.annotation-card").first();
     await firstCard.waitFor({ state: "visible", timeout: 30_000 });
     await firstCard.click();
@@ -350,10 +428,11 @@ async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeig
     if (await page.locator("rect[data-box-id]:not([data-handle])").count() !== 1) throw new Error("Annotation refresh persistence doğrulanamadı.");
     await page.getByRole("link", { name: "Galeriye dön" }).click();
     await page.getByText("MANUEL ETİKETLENDİ").first().waitFor({ state: "visible", timeout: 30_000 });
-    if (requested.some((url) => new URL(url).origin !== new URL(baseUrl).origin)) throw new Error("Annotation akışında cross-origin istek bulundu.");
+    assertSameOriginRequests(requested, expectedOrigin);
     if (/backend:8000|minio:9000|run_token|object_key|bucket/i.test(await page.content())) throw new Error("Annotation DOM internal storage verisi içeriyor.");
     return { revision: savedBody.project_revision, box };
   } finally {
+    if (requestListener) page.off("request", requestListener);
     await context.close();
     await browser.close();
   }
@@ -566,6 +645,23 @@ async function waitForService(project, env, service, expected = "healthy", timeo
   throw new Error(`${service} kontrollü restart sonrasında hazır olmadı.`);
 }
 
+async function waitForUrlFixtureFromWorker(project, env, fixtureUrl, timeoutMs = 30_000) {
+  const probe = [
+    "import httpx,sys",
+    "r=httpx.get(sys.argv[1],follow_redirects=False,timeout=3,trust_env=False)",
+    "assert r.status_code==200",
+    "assert r.headers.get('content-type','').split(';',1)[0]=='video/mp4'",
+    "assert int(r.headers.get('content-length','0'))>0",
+  ].join(";");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await docker(project, env, ["exec", "-T", "frame-worker", "python", "-c", probe, fixtureUrl], { timeoutMs: 10_000, allowFailure: true });
+    if (result.code === 0) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  throw new Error("URL fixture worker ağ görünümünde hazır olmadı.");
+}
+
 async function verifyPersistedResultPage(baseUrl, jobId) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -589,6 +685,7 @@ async function main() {
   const project = projectName();
   const mode = process.argv[2] ?? "run";
   if (mode === "--redaction-self-test") return verifyRedaction();
+  if (mode === "--request-origin-self-test") return verifySameOriginAssertion();
   const publicHost = process.env.FULL_STACK_E2E_PUBLIC_HOST ?? "127.0.0.1";
   if (!["127.0.0.1", "host.docker.internal"].includes(publicHost)) throw new Error("FULL_STACK_E2E_PUBLIC_HOST izin verilen bir host değil.");
   const frontendPort = await freePort();
@@ -665,6 +762,7 @@ async function main() {
     await run("docker", ["network", "create", "--subnet", "93.184.216.0/24", "--label", `com.docker.compose.project=${project}`, fixtureNetwork], { timeoutMs: 30_000 });
     await run("docker", ["network", "connect", fixtureNetwork, worker.stdout], { timeoutMs: 30_000 });
     await run("docker", ["run", "-d", "--name", `${project}_fixture`, "--network", fixtureNetwork, "--ip", "93.184.216.34", "--label", `com.docker.compose.project=${project}`, "--mount", `type=bind,source=${temporaryDirectory},target=/usr/share/nginx/html,readonly`, "nginx:1.27-alpine"], { timeoutMs: 60_000 });
+    await waitForUrlFixtureFromWorker(project, env, "http://93.184.216.34/fixture.mp4");
     for (const [index, extension] of ["jpg", "png", "webp"].entries()) {
       await docker(project, env, ["exec", "-T", "frame-worker", "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `testsrc2=size=${320 + index * 40}x${180 + index * 20}:rate=1:duration=1`, "-frames:v", "1", "-threads", "1", "-y", `/tmp/e2e-image.${extension}`], { timeoutMs: 60_000 });
       await run("docker", ["cp", `${worker.stdout}:/tmp/e2e-image.${extension}`, imagePaths[index]], { timeoutMs: 30_000 });
