@@ -201,6 +201,343 @@ def test_structured_redaction_covers_labeled_sensitive_fields() -> None:
     assert redacted == " ".join(f"{label}=[REDACTED]" for label in labels)
 
 
+def _write_junit(path: Path, testcases: str) -> None:
+    path.write_text(
+        f'<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite>{testcases}'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+
+
+def test_junit_diagnostic_reports_first_failure_deterministically(
+    tmp_path, capsys
+) -> None:
+    report = tmp_path / "report.xml"
+    _write_junit(
+        report,
+        '<testcase classname="tests.first" name="test_failed">'
+        '<failure type="AssertionError" message="assert 2 == 3" /></testcase>'
+        '<testcase classname="tests.second" name="test_error">'
+        '<error type="RuntimeError" message="later error" /></testcase>',
+    )
+
+    harness._publish_pytest_failure(report)
+
+    assert capsys.readouterr().out.splitlines() == [
+        "pytest_failure_node=tests.first::test_failed",
+        "pytest_failure_type=AssertionError",
+        "pytest_failure_summary=assert 2 == 3",
+    ]
+
+
+def test_junit_diagnostic_preserves_error_before_later_failure(
+    tmp_path, capsys
+) -> None:
+    report = tmp_path / "report.xml"
+    _write_junit(
+        report,
+        '<testcase classname="tests.first" name="test_error">'
+        '<error type="RuntimeError" message="first error" /></testcase>'
+        '<testcase classname="tests.second" name="test_failed">'
+        '<failure type="AssertionError" message="later failure" /></testcase>',
+    )
+
+    harness._publish_pytest_failure(report)
+
+    output = capsys.readouterr().out
+    assert "pytest_failure_node=tests.first::test_error" in output
+    assert "pytest_failure_type=RuntimeError" in output
+    assert "later failure" not in output
+
+
+DRIVER_DATABASE_URL = (
+    "postgresql+psycopg://diagnostic_user:diagnostic_password@"
+    "127.0.0.1:5432/diagnostic_db"
+)
+DIAGNOSTIC_CANARIES = (
+    ("driver_database_url", DRIVER_DATABASE_URL, True),
+    (
+        "normalized_database_url",
+        "postgresql://normalized_user:normalized_password@127.0.0.1:5432/normalized_db",
+        True,
+    ),
+    ("redis_url", "redis://:diagnostic_password@127.0.0.1:6379/7", True),
+    ("minio_endpoint", "http://127.0.0.1:9000", True),
+    ("bucket", "bucket7", True),
+    ("queue", "queue7", True),
+    ("runtime_id", "task7", True),
+    ("object_key", "jobs/task7/frames/object.jpg", False),
+    ("object_prefix", "jobs/task7", False),
+)
+
+
+@pytest.mark.parametrize("field", ["node", "type", "summary"])
+@pytest.mark.parametrize("_kind,canary,use_exact", DIAGNOSTIC_CANARIES)
+def test_junit_diagnostic_redacts_each_field_without_relying_on_truncation(
+    tmp_path, capsys, field, _kind, canary, use_exact
+) -> None:
+    report = tmp_path / "report.xml"
+    node = f"case-{canary}" if field == "node" else "case-safe"
+    failure_type = f"Error-{canary}" if field == "type" else "SafeError"
+    message = f"failed {canary}" if field == "summary" else "safe failure"
+    raw_value = {
+        "node": f"tests.safe::{node}",
+        "type": failure_type,
+        "summary": message,
+    }[field]
+    field_limit = {
+        "node": harness.PYTEST_DIAGNOSTIC_NODE_MAX_CHARS,
+        "type": harness.PYTEST_DIAGNOSTIC_TYPE_MAX_CHARS,
+        "summary": harness.PYTEST_DIAGNOSTIC_MAX_CHARS,
+    }[field]
+    assert canary in raw_value
+    assert len(raw_value) < field_limit
+    _write_junit(
+        report,
+        f'<testcase classname="tests.safe" name="{node}">'
+        f'<failure type="{failure_type}" message="{message}" /></testcase>',
+    )
+
+    harness._publish_pytest_failure(report, (canary,) if use_exact else ())
+
+    output = capsys.readouterr().out
+    assert canary not in output
+    assert "[REDACTED]" in output
+    if canary == DRIVER_DATABASE_URL:
+        assert "diagnostic_user" not in output
+        assert "diagnostic_password" not in output
+        assert "diagnostic_db" not in output
+
+
+def test_junit_diagnostic_is_bounded_to_three_lines_and_500_chars(
+    tmp_path, capsys
+) -> None:
+    report = tmp_path / "report.xml"
+    node = " ".join(["node"] * 100)
+    failure_type = " ".join(["kind"] * 50)
+    message = " ".join(["summary"] * 100)
+    _write_junit(
+        report,
+        f'<testcase classname="tests.bounds" name="{node}">'
+        f'<failure type="{failure_type}" message="{message}" /></testcase>',
+    )
+
+    harness._publish_pytest_failure(report)
+    first_output = capsys.readouterr().out
+    harness._publish_pytest_failure(report)
+    second_output = capsys.readouterr().out
+    output = first_output
+    lines = output.splitlines()
+    assert len(output) == harness.PYTEST_DIAGNOSTIC_MAX_CHARS == 500
+    assert output.endswith("\n")
+    assert output == second_output
+    assert len(lines) == 3
+    assert [line.split("=", 1)[0] for line in lines] == [
+        "pytest_failure_node",
+        "pytest_failure_type",
+        "pytest_failure_summary",
+    ]
+    assert all(line.count("=") == 1 for line in lines)
+    assert all(
+        output.count(f"{field}=") == 1
+        for field in (
+            "pytest_failure_node",
+            "pytest_failure_type",
+            "pytest_failure_summary",
+        )
+    )
+
+
+def _fake_pytest_process(
+    exit_code: int,
+    command: list[str] | None = None,
+    junit_contents: str | None = None,
+) -> SimpleNamespace:
+    def wait(*, timeout):
+        assert timeout > 0
+        if command is not None:
+            junit_option = command.index("--junitxml")
+            junit_path = Path(command[junit_option + 1])
+            assert junit_path.is_absolute()
+            assert not junit_path.exists()
+            if junit_contents is not None:
+                junit_path.write_text(junit_contents, encoding="utf-8")
+        return exit_code
+
+    return SimpleNamespace(
+        returncode=exit_code,
+        stdout=io.BytesIO(),
+        stderr=io.BytesIO(),
+        wait=wait,
+    )
+
+
+@pytest.mark.parametrize("contents,exit_code", [(None, 41), ("", 42), ("not xml", 43)])
+def test_junit_unavailable_lifecycle_preserves_exit_and_cleanup_priority(
+    tmp_path, capsys, contents, exit_code
+) -> None:
+    run_temp = (tmp_path / "run").resolve()
+    run_temp.mkdir()
+    report, cleanup_paths = harness._pytest_artifacts(run_temp)
+    command = harness._pytest_command(["tests"], report)
+    actual_exit, _output = harness._complete_pytest_run(
+        _fake_pytest_process(exit_code, command, contents), report, (), timeout=1
+    )
+    cleanup_calls: list[str] = []
+    cleanup_operations = _operations(set(), cleanup_calls)
+
+    def cleanup_junit() -> None:
+        cleanup_calls.append("LOG_CLEANUP")
+        harness._cleanup_log_paths(cleanup_paths)
+
+    cleanup_operations["LOG_CLEANUP"] = cleanup_junit
+    lifecycle_exit = harness.main(
+        cleanup_operations=cleanup_operations,
+        test_exit_code=actual_exit,
+        cleanup_receipt=tmp_path / "receipt.json",
+    )
+
+    captured = capsys.readouterr()
+    assert actual_exit == lifecycle_exit == exit_code
+    assert f"pytest_status=FAILED exit_code={exit_code}" in captured.out
+    assert "pytest_failure_summary=UNAVAILABLE\n" in captured.out
+    assert "ParseError" not in captured.out + captured.err
+    assert "Traceback" not in captured.out + captured.err
+    assert "not xml" not in captured.out + captured.err
+    assert cleanup_calls == list(harness.REQUIRED_CLEANUP_STEPS)
+    assert not report.exists()
+    assert (tmp_path / "receipt.json").is_file()
+
+
+def test_passing_pytest_lifecycle_has_no_failure_diagnostic(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    run_temp = (tmp_path / "run").resolve()
+    run_temp.mkdir()
+    report, cleanup_paths = harness._pytest_artifacts(run_temp)
+    junit_contents = (
+        '<testsuites><testsuite><testcase classname="tests.pass" '
+        'name="test_pass" /></testsuite></testsuites>'
+    )
+    calls = []
+    monkeypatch.setattr(
+        harness,
+        "_publish_pytest_failure",
+        lambda *_args, **_kwargs: calls.append("failure"),
+    )
+
+    command = harness._pytest_command(["tests"], report)
+    assert not report.exists()
+    exit_code, _output = harness._complete_pytest_run(
+        _fake_pytest_process(0, command, junit_contents),
+        report,
+        ("db7",),
+        timeout=1,
+    )
+    receipt = tmp_path / "receipt.json"
+    cleanup_calls: list[str] = []
+    cleanup_operations = _operations(set(), cleanup_calls)
+
+    def cleanup_junit() -> None:
+        cleanup_calls.append("LOG_CLEANUP")
+        harness._cleanup_log_paths(cleanup_paths)
+
+    cleanup_operations["LOG_CLEANUP"] = cleanup_junit
+    lifecycle_exit = harness.main(
+        cleanup_operations=cleanup_operations,
+        test_exit_code=exit_code,
+        cleanup_receipt=receipt,
+    )
+
+    captured = capsys.readouterr()
+    assert command == ["uv", "run", "pytest", "tests", "--junitxml", str(report)]
+    assert report.is_absolute()
+    assert report.parent == run_temp
+    assert calls == []
+    assert "pytest_failure_" not in captured.out + captured.err
+    assert not report.exists()
+    assert lifecycle_exit == 0
+    assert receipt.is_file()
+    assert cleanup_calls == list(harness.REQUIRED_CLEANUP_STEPS)
+
+
+def test_failing_pytest_lifecycle_reports_then_cleans_and_preserves_exit(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    run_temp = (tmp_path / "run").resolve()
+    run_temp.mkdir()
+    report, cleanup_paths = harness._pytest_artifacts(run_temp)
+    junit_contents = (
+        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite>'
+        '<testcase classname="tests.fail" name="test_failed-db7">'
+        '<failure type="AssertionError" message="db7 failed" /></testcase>'
+        "</testsuite></testsuites>"
+    )
+    sensitive_values = ("db7",)
+    publish_calls = []
+    original_publish = harness._publish_pytest_failure
+
+    def publish(path, values):
+        publish_calls.append((path, values))
+        original_publish(path, values)
+
+    monkeypatch.setattr(harness, "_publish_pytest_failure", publish)
+
+    command = harness._pytest_command(["tests"], report)
+    assert not report.exists()
+    exit_code, _output = harness._complete_pytest_run(
+        _fake_pytest_process(7, command, junit_contents),
+        report,
+        sensitive_values,
+        timeout=1,
+    )
+    cleanup_calls: list[str] = []
+    cleanup_operations = _operations({"DATABASE_CLEANUP"}, cleanup_calls)
+
+    def cleanup_junit() -> None:
+        cleanup_calls.append("LOG_CLEANUP")
+        harness._cleanup_log_paths(cleanup_paths)
+
+    cleanup_operations["LOG_CLEANUP"] = cleanup_junit
+    lifecycle_exit = harness.main(
+        cleanup_operations=cleanup_operations,
+        test_exit_code=exit_code,
+        cleanup_receipt=tmp_path / "receipt.json",
+    )
+
+    captured = capsys.readouterr()
+    assert publish_calls == [(report, sensitive_values)]
+    assert captured.out.splitlines()[:4] == [
+        "pytest_status=FAILED exit_code=7",
+        "pytest_failure_node=tests.fail::test_failed-[REDACTED]",
+        "pytest_failure_type=AssertionError",
+        "pytest_failure_summary=[REDACTED] failed",
+    ]
+    assert not report.exists()
+    assert lifecycle_exit == 7
+    assert not (tmp_path / "receipt.json").exists()
+    assert cleanup_calls == list(harness.REQUIRED_CLEANUP_STEPS)
+    assert "cleanup_failed=DATABASE_CLEANUP" in captured.err
+
+
+@pytest.mark.parametrize("exit_code", [1, 7])
+def test_failure_diagnostic_does_not_change_pytest_exit_code(
+    tmp_path, capsys, exit_code
+) -> None:
+    report = tmp_path / "report.xml"
+    _write_junit(
+        report,
+        '<testcase classname="tests.exit" name="test_failed">'
+        '<failure type="AssertionError" message="safe" /></testcase>',
+    )
+    actual_exit_code, _output = harness._complete_pytest_run(
+        _fake_pytest_process(exit_code), report, (), timeout=1
+    )
+
+    assert actual_exit_code == exit_code
+    assert "pytest_failure_summary=safe" in capsys.readouterr().out
+
+
 def test_harness_requires_current_single_migration_head() -> None:
     assert harness.TARGET_REVISION == "20260914_0007"
     assert harness.DEPENDENCY_PREP_TIMEOUT_SECONDS == 300
