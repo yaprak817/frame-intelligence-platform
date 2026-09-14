@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -31,6 +33,9 @@ STORAGE_CLEANUP_MAX_ATTEMPTS = 5
 DEPENDENCY_PREP_TIMEOUT_SECONDS = 300
 MIGRATION_TIMEOUT_SECONDS = 120
 CLEANUP_FAILURE_EXIT = 2
+PYTEST_DIAGNOSTIC_MAX_CHARS = 500
+PYTEST_DIAGNOSTIC_NODE_MAX_CHARS = 200
+PYTEST_DIAGNOSTIC_TYPE_MAX_CHARS = 120
 REQUIRED_CLEANUP_STEPS = (
     "PROCESS_TREE_STOP",
     "PROCESS_TREE_VERIFY",
@@ -53,19 +58,41 @@ REDACTIONS = (
     ),
     re.compile(r"(?i)(authorization\s*:\s*(?:bearer\s+)?)[^\s]+"),
     re.compile(r"(?i)\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
-    re.compile(r"(?i)\b(?:postgres(?:ql)?|redis|s3)://[^\s]+"),
+    re.compile(r"(?i)\b(?:postgres(?:ql)?(?:\+[a-z][a-z0-9_]*)?|redis|s3)://[^\s]+"),
     re.compile(r"https?://[^\s]+"),
     re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b"),
-    re.compile(r"(?i)(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}"),
+    re.compile(
+        r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+        r"[89ab][0-9a-f]{3}-[0-9a-f]{12}\b"
+    ),
+    re.compile(r"(?i)\b[A-Z]:[\\/][^\s<>'\"]+"),
+    re.compile(r"(?<![:\w])/(?:[^/\s<>'\"]+/)+[^\s<>'\"]*"),
+    re.compile(
+        r"(?<![\w./-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
+        r"(?![\w./-])"
+    ),
+    re.compile(r"\b[A-Za-z0-9_-]{32,}\b"),
 )
+IPV6_CANDIDATE = re.compile(r"(?i)(?<![0-9a-f:])[0-9a-f:]*:[0-9a-f:]+(?![0-9a-f:])")
 
 
 def _redact(value: str, sensitive_values: tuple[str, ...] = ()) -> str:
-    for sensitive in sorted(filter(None, sensitive_values), key=len, reverse=True):
+    for sensitive in sorted(set(filter(None, sensitive_values)), key=len, reverse=True):
         value = value.replace(sensitive, "[REDACTED]")
     value = REDACTIONS[0].sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
     for pattern in REDACTIONS[1:]:
         value = pattern.sub("[REDACTED]", value)
+
+    def redact_ipv6(match: re.Match[str]) -> str:
+        if match.group() == "::":
+            return match.group()
+        try:
+            ipaddress.ip_address(match.group())
+        except ValueError:
+            return match.group()
+        return "[REDACTED]"
+
+    value = IPV6_CANDIDATE.sub(redact_ipv6, value)
     return value[-12_000:]
 
 
@@ -82,6 +109,95 @@ def _publish_pytest_status(exit_code: object) -> int:
     status = "PASSED" if safe_exit_code == 0 else "FAILED"
     print(f"pytest_status={status} exit_code={safe_exit_code}")
     return safe_exit_code
+
+
+def _bounded_diagnostic(
+    value: str, limit: int, sensitive_values: tuple[str, ...] = ()
+) -> str:
+    lines = [
+        " ".join(line.split())
+        for line in _redact(value, sensitive_values).splitlines()[:3]
+    ]
+    compact = " | ".join(line for line in lines if line)
+    return compact[:limit] or "UNAVAILABLE"
+
+
+def _publish_pytest_failure(path: Path, sensitive_values: tuple[str, ...] = ()) -> None:
+    try:
+        root = ET.parse(path).getroot()
+        selected: tuple[ET.Element, ET.Element] | None = None
+        for testcase in root.iter("testcase"):
+            outcome = next(
+                (
+                    child
+                    for child in testcase
+                    if child.tag.rsplit("}", 1)[-1] in {"failure", "error"}
+                ),
+                None,
+            )
+            if outcome is not None:
+                selected = testcase, outcome
+                break
+        if selected is None:
+            raise ValueError("JUnit report contains no failure")
+        testcase, outcome = selected
+        node_source = "::".join(
+            filter(None, (testcase.get("classname"), testcase.get("name")))
+        )
+        node = _bounded_diagnostic(
+            node_source, PYTEST_DIAGNOSTIC_NODE_MAX_CHARS, sensitive_values
+        )
+        failure_type = _bounded_diagnostic(
+            outcome.get("type") or outcome.tag.rsplit("}", 1)[-1],
+            PYTEST_DIAGNOSTIC_TYPE_MAX_CHARS,
+            sensitive_values,
+        )
+        output_prefix = (
+            f"pytest_failure_node={node}\n"
+            f"pytest_failure_type={failure_type}\n"
+            "pytest_failure_summary="
+        )
+        summary_budget = max(1, PYTEST_DIAGNOSTIC_MAX_CHARS - len(output_prefix) - 1)
+        summary = _bounded_diagnostic(
+            outcome.get("message") or outcome.text or "UNAVAILABLE",
+            summary_budget,
+            sensitive_values,
+        )
+        output = f"{output_prefix}{summary}\n"
+        if len(output) > PYTEST_DIAGNOSTIC_MAX_CHARS:
+            raise ValueError("Diagnostic output exceeds its bound")
+        print(output, end="")
+    except Exception:
+        print("pytest_failure_summary=UNAVAILABLE")
+
+
+def _cleanup_log_paths(paths: list[Path]) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+def _pytest_artifacts(run_temp: Path) -> tuple[Path, list[Path]]:
+    if not run_temp.is_absolute():
+        raise ValueError("Pytest artifact root must be absolute")
+    junit_path = run_temp / "pytest-junit.xml"
+    return junit_path, [junit_path]
+
+
+def _pytest_command(pytest_args: list[str], junit_path: Path) -> list[str]:
+    return ["uv", "run", "pytest", *pytest_args, "--junitxml", str(junit_path)]
+
+
+def _complete_pytest_run(
+    process: subprocess.Popen[bytes],
+    junit_path: Path,
+    sensitive_values: tuple[str, ...],
+    *,
+    timeout: float,
+) -> tuple[int, bytes]:
+    exit_code, bounded_output = _wait_for_pytest(process, timeout=timeout)
+    if exit_code != 0:
+        _publish_pytest_failure(junit_path, sensitive_values)
+    return exit_code, bounded_output
 
 
 def _wait_for_pytest(
@@ -593,6 +709,9 @@ def main(
     )
     admin_url = _database_url(admin_url, "postgres")
     database_url = _database_url(admin_url, database_name)
+    pytest_database_url = database_url.replace(
+        "postgresql://", "postgresql+psycopg://", 1
+    )
     redis_base = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
     redis_parts = urlsplit(redis_base)
     redis_db = secrets.SystemRandom().choice(range(1, 14))
@@ -603,11 +722,15 @@ def main(
     access_key = os.environ.get("OBJECT_STORAGE_ACCESS_KEY", "frame_admin")
     secret_key = os.environ.get("OBJECT_STORAGE_SECRET_KEY", "change_me")
     sensitive_values = (
+        run_id,
         database_name,
         bucket,
         queue,
+        f"{queue}:",
+        f"issue35-{run_id}",
         admin_url,
         database_url,
+        pytest_database_url,
         broker_url,
         storage_endpoint,
         access_key,
@@ -617,10 +740,8 @@ def main(
     env.update(
         ASYNC_E2E_INTEGRATION="1",
         OBJECT_STORAGE_INTEGRATION="1",
-        DATABASE_URL=database_url.replace("postgresql://", "postgresql+psycopg://", 1),
-        TEST_DATABASE_URL=database_url.replace(
-            "postgresql://", "postgresql+psycopg://", 1
-        ),
+        DATABASE_URL=pytest_database_url,
+        TEST_DATABASE_URL=pytest_database_url,
         CELERY_BROKER_URL=broker_url,
         REDIS_URL=broker_url,
         CELERY_TASK_QUEUE=queue,
@@ -641,6 +762,7 @@ def main(
     run_temp = Path(tempfile.mkdtemp(prefix=f"issue35-{run_id}-"))
     publisher_ready = run_temp / "publisher.ready"
     process_registry_path = run_temp / "process-registry.json"
+    pytest_junit, logs = _pytest_artifacts(run_temp)
     process_registry = ProcessRegistry(process_registry_path)
     process_registry.start_monitor()
     cleanup_receipt_value = os.environ.get("ASYNC_CLEANUP_RECEIPT")
@@ -651,7 +773,6 @@ def main(
     env["OUTBOX_READY_FILE"] = str(publisher_ready)
     children: list[subprocess.Popen[bytes]] = []
     service_children: list[subprocess.Popen[bytes]] = []
-    logs: list[Path] = []
     s3 = boto3.client(
         "s3",
         endpoint_url=storage_endpoint,
@@ -782,7 +903,7 @@ def main(
             subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
         )
         pytest_process = subprocess.Popen(
-            ["uv", "run", "pytest", *pytest_args],
+            _pytest_command(pytest_args, pytest_junit),
             cwd=worker,
             env=env,
             stdout=subprocess.PIPE,
@@ -793,8 +914,11 @@ def main(
         children.append(pytest_process)
         process_registry.register_root(pytest_process.pid)
         try:
-            test_exit_code, bounded_output = _wait_for_pytest(
-                pytest_process, timeout=1200
+            test_exit_code, bounded_output = _complete_pytest_run(
+                pytest_process,
+                pytest_junit,
+                sensitive_values,
+                timeout=1200,
             )
         except subprocess.TimeoutExpired:
             test_exit_code = 1
@@ -856,8 +980,7 @@ def main(
                 raise RuntimeError("Database cleanup verification failed")
 
         def cleanup_logs() -> None:
-            for path in logs:
-                path.unlink(missing_ok=True)
+            _cleanup_log_paths(logs)
 
         def cleanup_ready_file() -> None:
             publisher_ready.unlink(missing_ok=True)
