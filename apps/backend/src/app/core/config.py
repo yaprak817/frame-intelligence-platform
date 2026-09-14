@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     rate_limit_result_requests: int = 60
     rate_limit_annotation_read_requests: int = 120
     rate_limit_annotation_mutation_requests: int = 30
+    rate_limit_annotation_snapshot_requests: int = 5
+    annotation_training_max_snapshots_per_project: int = 5
     annotation_max_payload_bytes: int = 256 * 1024
     rate_limit_window_seconds: int = 60
     dependency_timeout_seconds: float = 2.0
@@ -215,6 +217,14 @@ class Settings(BaseSettings):
         if not 1 <= self.rate_limit_annotation_mutation_requests <= 100_000:
             raise ValueError(
                 "RATE_LIMIT_ANNOTATION_MUTATION_REQUESTS must be between 1 and 100000"
+            )
+        if not 1 <= self.rate_limit_annotation_snapshot_requests <= 10_000:
+            raise ValueError(
+                "RATE_LIMIT_ANNOTATION_SNAPSHOT_REQUESTS must be between 1 and 10000"
+            )
+        if not 1 <= self.annotation_training_max_snapshots_per_project <= 20:
+            raise ValueError(
+                "ANNOTATION_TRAINING_MAX_SNAPSHOTS_PER_PROJECT must be between 1 and 20"
             )
         if not 1024 <= self.annotation_max_payload_bytes <= 1024 * 1024:
             raise ValueError(

@@ -202,7 +202,7 @@ def test_structured_redaction_covers_labeled_sensitive_fields() -> None:
 
 
 def test_harness_requires_current_single_migration_head() -> None:
-    assert harness.TARGET_REVISION == "20260909_0006"
+    assert harness.TARGET_REVISION == "20260914_0007"
     assert harness.DEPENDENCY_PREP_TIMEOUT_SECONDS == 300
     assert harness.MIGRATION_TIMEOUT_SECONDS == 120
 

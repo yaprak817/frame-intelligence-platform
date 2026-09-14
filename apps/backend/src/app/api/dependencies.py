@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.db.session import get_session
 from app.repositories.jobs import SQLAlchemyJobRepository
 from app.security.source_secrets import SourceSecretCipher
+from app.services.annotation_training import AnnotationTrainingService
 from app.services.annotations import AnnotationService
 from app.services.frame_exports import FrameExportService
 from app.services.job_service import JobService
@@ -68,6 +69,16 @@ def get_annotation_service(
     request: Request, session: SessionDependency
 ) -> AnnotationService:
     return AnnotationService(session, get_result_artifact_service(request, session))
+
+
+def get_annotation_training_service(
+    request: Request, session: SessionDependency
+) -> AnnotationTrainingService:
+    return AnnotationTrainingService(
+        session,
+        get_result_artifact_service(request, session),
+        max_snapshots_per_project=settings.annotation_training_max_snapshots_per_project,
+    )
 
 
 async def authorize_result_access() -> None:

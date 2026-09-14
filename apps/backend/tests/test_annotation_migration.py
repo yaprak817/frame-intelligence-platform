@@ -3,6 +3,8 @@ import os
 import subprocess
 import sys
 from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -12,13 +14,23 @@ from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.domain.jobs import JobStatus, SourceType
+from app.models.annotation_training import (
+    AnnotationTrainingRun,
+    AnnotationTrainingSnapshotBox,
+    AnnotationTrainingSnapshotClass,
+    AnnotationTrainingSnapshotImage,
+)
 from app.models.annotations import AnnotationProject
 from app.models.processing_job import ProcessingJob
 
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+ALEMBIC_CONFIG = BACKEND_ROOT / "alembic.ini"
 
-def test_annotation_migration_is_the_single_head() -> None:
-    script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["20260909_0006"]
+
+def test_annotation_migration_is_the_single_head(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    script = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
+    assert script.get_heads() == ["20260914_0007"]
 
 
 async def inspect_schema() -> None:
@@ -45,11 +57,23 @@ async def inspect_schema() -> None:
                     )
                 }
             )
+            training_uniques = await connection.run_sync(
+                lambda sync: {
+                    item["name"]
+                    for item in sa.inspect(sync).get_unique_constraints(
+                        "annotation_training_runs"
+                    )
+                }
+            )
         assert {
             "annotation_projects",
             "annotation_classes",
             "annotation_images",
             "annotation_boxes",
+            "annotation_training_runs",
+            "annotation_training_snapshot_classes",
+            "annotation_training_snapshot_images",
+            "annotation_training_snapshot_boxes",
         } <= tables
         assert not any("annotation_export" in table for table in tables)
         assert "ck_annotation_projects_revision" in project_checks
@@ -61,6 +85,7 @@ async def inspect_schema() -> None:
             "ck_annotation_boxes_x_bounds",
             "ck_annotation_boxes_y_bounds",
         } <= box_checks
+        assert "uq_annotation_training_runs_source_revision" in training_uniques
     finally:
         await engine.dispose()
 
@@ -81,8 +106,15 @@ def run_alembic(*arguments: str, check: bool = True) -> subprocess.CompletedProc
     environment = os.environ.copy()
     environment["DATABASE_URL"] = environment["TEST_DATABASE_URL"]
     return subprocess.run(
-        [sys.executable, "-m", "alembic", *arguments],
-        cwd=os.path.dirname(os.path.dirname(__file__)),
+        [
+            sys.executable,
+            "-m",
+            "alembic",
+            "-c",
+            str(ALEMBIC_CONFIG),
+            *arguments,
+        ],
+        cwd=BACKEND_ROOT,
         env=environment,
         check=check,
         capture_output=True,
@@ -137,19 +169,135 @@ async def seed_annotation_project() -> tuple:
                     updated_at=now,
                 )
             )
+            await session.flush()
+            training_id, class_id, box_id = uuid4(), uuid4(), uuid4()
+            session.add(
+                AnnotationTrainingRun(
+                    id=training_id,
+                    project_id=project_id,
+                    snapshot_version=1,
+                    source_revision=0,
+                    status="SNAPSHOT_READY",
+                    selected_image_count=50,
+                    selected_class_count=1,
+                    selected_box_count=1,
+                    train_image_count=40,
+                    validation_image_count=10,
+                    config={"max_snapshot_images": 50},
+                    config_hash="a" * 64,
+                    idempotency_key="migration-training-key",
+                    request_fingerprint="b" * 64,
+                    created_at=now,
+                    started_at=None,
+                    completed_at=now,
+                    failure_code=None,
+                    snapshot_artifact_reference=None,
+                    snapshot_artifact_size_bytes=None,
+                    snapshot_artifact_sha256=None,
+                    model_artifact_reference=None,
+                    model_artifact_size_bytes=None,
+                    model_artifact_sha256=None,
+                )
+            )
+            await session.flush()
+            session.add(
+                AnnotationTrainingSnapshotClass(
+                    training_id=training_id,
+                    project_id=project_id,
+                    class_id=class_id,
+                    yolo_index=0,
+                    name="vehicle",
+                )
+            )
+            session.add(
+                AnnotationTrainingSnapshotImage(
+                    training_id=training_id,
+                    project_id=project_id,
+                    image_index=0,
+                    filename="frame.jpg",
+                    source_object_key="jobs/test/frame.jpg",
+                    source_size_bytes=100,
+                    source_content_type="image/jpeg",
+                    source_sha256="c" * 64,
+                    width=640,
+                    height=360,
+                    timestamp_ms=0,
+                    split="train",
+                )
+            )
+            await session.flush()
+            session.add(
+                AnnotationTrainingSnapshotBox(
+                    training_id=training_id,
+                    project_id=project_id,
+                    box_id=box_id,
+                    image_index=0,
+                    yolo_index=0,
+                    x_center=Decimal("0.50000000"),
+                    y_center=Decimal("0.50000000"),
+                    width=Decimal("0.25000000"),
+                    height=Decimal("0.25000000"),
+                )
+            )
             await session.commit()
-        return job_id, project_id
+        return job_id, project_id, training_id
     finally:
         await engine.dispose()
 
 
-async def remove_annotation_project(job_id) -> None:
+async def remove_annotation_project(job_id, project_id) -> dict[str, int]:
     engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
     try:
         async with engine.begin() as connection:
             await connection.execute(
+                sa.delete(AnnotationTrainingSnapshotBox).where(
+                    AnnotationTrainingSnapshotBox.project_id == project_id
+                )
+            )
+            await connection.execute(
+                sa.delete(AnnotationTrainingSnapshotImage).where(
+                    AnnotationTrainingSnapshotImage.project_id == project_id
+                )
+            )
+            await connection.execute(
+                sa.delete(AnnotationTrainingSnapshotClass).where(
+                    AnnotationTrainingSnapshotClass.project_id == project_id
+                )
+            )
+            await connection.execute(
+                sa.delete(AnnotationTrainingRun).where(
+                    AnnotationTrainingRun.project_id == project_id
+                )
+            )
+            await connection.execute(
+                sa.delete(AnnotationProject).where(AnnotationProject.id == project_id)
+            )
+            await connection.execute(
                 sa.delete(ProcessingJob).where(ProcessingJob.id == job_id)
             )
+            tables = {
+                "runs": AnnotationTrainingRun,
+                "classes": AnnotationTrainingSnapshotClass,
+                "images": AnnotationTrainingSnapshotImage,
+                "boxes": AnnotationTrainingSnapshotBox,
+                "projects": AnnotationProject,
+                "jobs": ProcessingJob,
+            }
+            counts = {}
+            for name, model in tables.items():
+                if model is ProcessingJob:
+                    identifier = ProcessingJob.id == job_id
+                elif model is AnnotationProject:
+                    identifier = AnnotationProject.id == project_id
+                else:
+                    identifier = model.project_id == project_id
+                counts[name] = int(
+                    await connection.scalar(
+                        sa.select(sa.func.count()).select_from(model).where(identifier)
+                    )
+                    or 0
+                )
+            return counts
     finally:
         await engine.dispose()
 
@@ -158,28 +306,76 @@ async def remove_annotation_project(job_id) -> None:
     os.environ.get("TEST_DATABASE_URL") is None,
     reason="TEST_DATABASE_URL is required for PostgreSQL integration tests",
 )
-def test_real_postgres_migration_downgrade_refusal_and_round_trip() -> None:
+def test_real_postgres_migration_downgrade_refuses_with_data() -> None:
     run_alembic("upgrade", "head")
-    assert "20260909_0006" in run_alembic("current").stdout
+    assert "20260914_0007" in run_alembic("current").stdout
     if sys.platform == "win32":
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
-            job_id, _project_id = runner.run(seed_annotation_project())
+            job_id, project_id, training_id = runner.run(seed_annotation_project())
     else:
-        job_id, _project_id = asyncio.run(seed_annotation_project())
+        job_id, project_id, training_id = asyncio.run(seed_annotation_project())
 
-    refused = run_alembic("downgrade", "20260902_0005", check=False)
+    refused = run_alembic("downgrade", "20260909_0006", check=False)
     assert refused.returncode != 0
-    assert "Downgrade refused while annotation data exists" in (
+    assert "Downgrade refused while annotation training snapshots exist" in (
         refused.stdout + refused.stderr
     )
-    assert "20260909_0006" in run_alembic("current").stdout
+    assert "20260914_0007" in run_alembic("current").stdout
+
+    async def assert_seed_preserved() -> None:
+        engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+        try:
+            async with engine.connect() as connection:
+                assert (
+                    await connection.scalar(
+                        sa.select(sa.func.count())
+                        .select_from(AnnotationTrainingRun)
+                        .where(AnnotationTrainingRun.id == training_id)
+                    )
+                    == 1
+                )
+                assert (
+                    await connection.scalar(
+                        sa.select(sa.func.count())
+                        .select_from(AnnotationProject)
+                        .where(AnnotationProject.id == project_id)
+                    )
+                    == 1
+                )
+        finally:
+            await engine.dispose()
 
     if sys.platform == "win32":
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
-            runner.run(remove_annotation_project(job_id))
+            runner.run(assert_seed_preserved())
+            counts = runner.run(remove_annotation_project(job_id, project_id))
     else:
-        asyncio.run(remove_annotation_project(job_id))
-    run_alembic("downgrade", "20260902_0005")
-    assert "20260902_0005" in run_alembic("current").stdout
-    run_alembic("upgrade", "head")
+        asyncio.run(assert_seed_preserved())
+        counts = asyncio.run(remove_annotation_project(job_id, project_id))
+    assert set(counts.values()) == {0}
+
+
+@pytest.mark.skipif(
+    os.environ.get("TEST_DATABASE_URL") is None,
+    reason="TEST_DATABASE_URL is required for PostgreSQL integration tests",
+)
+def test_real_postgres_migration_clean_round_trip() -> None:
+    run_alembic("upgrade", "20260914_0007")
+    if sys.platform == "win32":
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            job_id, project_id, _training_id = runner.run(seed_annotation_project())
+            counts = runner.run(remove_annotation_project(job_id, project_id))
+    else:
+        job_id, project_id, _training_id = asyncio.run(seed_annotation_project())
+        counts = asyncio.run(remove_annotation_project(job_id, project_id))
+    assert set(counts.values()) == {0}
+
+    run_alembic("downgrade", "20260909_0006")
     assert "20260909_0006" in run_alembic("current").stdout
+    run_alembic("upgrade", "20260914_0007")
+    assert "20260914_0007" in run_alembic("current").stdout
+    if sys.platform == "win32":
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            runner.run(inspect_schema())
+    else:
+        asyncio.run(inspect_schema())

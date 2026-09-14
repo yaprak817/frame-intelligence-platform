@@ -289,6 +289,31 @@ def test_dataset_previews_and_downloads_use_separate_buckets(
     assert expected_group != "results"
 
 
+def test_annotation_snapshot_create_has_an_isolated_rate_limit_group() -> None:
+    job = "11111111-1111-4111-8111-111111111111"
+    base = f"/api/v1/jobs/{job}/annotations/trainings"
+    assert protected_group("POST", base) == (
+        "annotation-snapshot",
+        "rate_limit_annotation_snapshot_requests",
+    )
+    assert protected_group("GET", base) == (
+        "annotation-read",
+        "rate_limit_annotation_read_requests",
+    )
+    assert protected_group("GET", f"{base}/{job}") == (
+        "annotation-read",
+        "rate_limit_annotation_read_requests",
+    )
+    lettered_job = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    for invalid in (
+        lettered_job.upper(),
+        job.replace("-", ""),
+        "{" + job + "}",
+    ):
+        invalid_base = f"/api/v1/jobs/{invalid}/annotations/trainings"
+        assert protected_group("POST", invalid_base) is None
+
+
 def test_preview_exhaustion_does_not_consume_dataset_download_quota() -> None:
     class CountingRedis:
         def __init__(self) -> None:
