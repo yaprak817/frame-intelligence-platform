@@ -560,6 +560,31 @@ async def exercise_video_sources() -> None:
                     and saved.completed
                     and len(saved.boxes) == 1
                 )
+                refreshed = await service.image(project, 0)
+                assert refreshed.project_revision == 2
+                assert refreshed.completed and len(refreshed.boxes) == 1
+                assert refreshed.boxes[0].x_center == 0.5
+                assert refreshed.boxes[0].y_center == 0.5
+                assert refreshed.boxes[0].width == 0.25
+                assert refreshed.boxes[0].height == 0.5
+                persisted_job = await session.get(ProcessingJob, job_id)
+                assert persisted_job is not None
+                assert persisted_job.status is JobStatus.SUCCEEDED
+                assert persisted_job.source_type is source_type
+                if source_type is SourceType.URL:
+                    previous_project_id = project.id
+                    previous_run_token = project.result_run_token
+                    new_run_token = uuid4()
+                    results.document = video_manifest(job_id, new_run_token)
+                    isolated, isolated_created = await service.get_or_create(job_id)
+                    assert isolated_created
+                    assert isolated.id != previous_project_id
+                    assert isolated.result_run_token == new_run_token
+                    assert isolated.result_run_token != previous_run_token
+                    isolated_image = await service.image(isolated, 0)
+                    assert isolated_image.project_revision == 0
+                    assert not isolated_image.completed
+                    assert isolated_image.boxes == []
     finally:
         async with sessions() as session:
             await session.execute(

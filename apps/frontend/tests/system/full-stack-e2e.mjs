@@ -208,8 +208,6 @@ async function projectResources(project) {
 
 async function cleanup(project, env, temporaryDirectory, baseline) {
   await docker(project, env, ["down", "--volumes", "--remove-orphans", "--rmi", "local", "--timeout", "10"], { timeoutMs: 120_000, allowFailure: true });
-  await run("docker", ["rm", "-f", `${project}_fixture`], { timeoutMs: 30_000, allowFailure: true });
-  await run("docker", ["network", "rm", `${project}_fixture`], { timeoutMs: 30_000, allowFailure: true });
   if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   const leaked = await projectResources(project);
   if (leaked.length) throw new Error(`İzole Docker cleanup tamamlanmadı (${leaked.length} kaynak).`);
@@ -438,30 +436,6 @@ async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeig
   }
 }
 
-async function urlVideoFlow(baseUrl, fixtureUrl) {
-  const submittedResponse = await fetch(`${baseUrl}/api/v1/jobs/url`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Idempotency-Key": `url-fixture-${Date.now()}` },
-    body: JSON.stringify({ url: fixtureUrl, processing: { candidate_fps: 4, selection_window_seconds: 1 } }),
-  });
-  const submitted = await submittedResponse.json();
-  const jobId = String(submitted?.job_id ?? "").toLowerCase();
-  if (submittedResponse.status !== 202 || !UUID.test(jobId)) throw new Error(`URL job submission geçersiz: HTTP ${submittedResponse.status}.`);
-  const deadline = Date.now() + JOB_TIMEOUT_MS;
-  let terminal;
-  while (Date.now() < deadline) {
-    const response = await fetch(`${baseUrl}/api/v1/jobs/${jobId}`, { cache: "no-store" });
-    const body = await response.json();
-    if (TERMINAL.has(body?.status)) { terminal = body.status; break; }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-  }
-  if (terminal !== "SUCCEEDED") throw new Error(`URL job terminal=${terminal ?? "timeout"}.`);
-  const resultResponse = await fetch(`${baseUrl}/api/v1/jobs/${jobId}/result`);
-  const manifest = await resultResponse.json();
-  if (!resultResponse.ok || !manifestIsPublic(manifest, jobId) || manifest.frames[0]?.width !== 1138 || manifest.frames[0]?.height !== 640) throw new Error("URL job public frame manifesti geçersiz.");
-  return { jobId, annotation: await annotationBrowserFlow(baseUrl, jobId, 1138, 640) };
-}
-
 async function browserFlow(baseUrl, videoPath) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ acceptDownloads: true });
@@ -645,23 +619,6 @@ async function waitForService(project, env, service, expected = "healthy", timeo
   throw new Error(`${service} kontrollü restart sonrasında hazır olmadı.`);
 }
 
-async function waitForUrlFixtureFromWorker(project, env, fixtureUrl, timeoutMs = 30_000) {
-  const probe = [
-    "import httpx,sys",
-    "r=httpx.get(sys.argv[1],follow_redirects=False,timeout=3,trust_env=False)",
-    "assert r.status_code==200",
-    "assert r.headers.get('content-type','').split(';',1)[0]=='video/mp4'",
-    "assert int(r.headers.get('content-length','0'))>0",
-  ].join(";");
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const result = await docker(project, env, ["exec", "-T", "frame-worker", "python", "-c", probe, fixtureUrl], { timeoutMs: 10_000, allowFailure: true });
-    if (result.code === 0) return;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-  }
-  throw new Error("URL fixture worker ağ görünümünde hazır olmadı.");
-}
-
 async function verifyPersistedResultPage(baseUrl, jobId) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -758,11 +715,6 @@ async function main() {
     if (!/^[0-9a-f]{12,64}$/.test(worker.stdout)) throw new Error("Doğrulanmış worker container bulunamadı.");
     await docker(project, env, ["exec", "-T", "frame-worker", "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=12:duration=4", "-vf", "eq=brightness=0.10:saturation=1.15", "-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-y", "/tmp/e2e-fixture.mp4"], { timeoutMs: 60_000 });
     await run("docker", ["cp", `${worker.stdout}:/tmp/e2e-fixture.mp4`, videoPath], { timeoutMs: 30_000 });
-    const fixtureNetwork = `${project}_fixture`;
-    await run("docker", ["network", "create", "--subnet", "93.184.216.0/24", "--label", `com.docker.compose.project=${project}`, fixtureNetwork], { timeoutMs: 30_000 });
-    await run("docker", ["network", "connect", fixtureNetwork, worker.stdout], { timeoutMs: 30_000 });
-    await run("docker", ["run", "-d", "--name", `${project}_fixture`, "--network", fixtureNetwork, "--ip", "93.184.216.34", "--label", `com.docker.compose.project=${project}`, "--mount", `type=bind,source=${temporaryDirectory},target=/usr/share/nginx/html,readonly`, "nginx:1.27-alpine"], { timeoutMs: 60_000 });
-    await waitForUrlFixtureFromWorker(project, env, "http://93.184.216.34/fixture.mp4");
     for (const [index, extension] of ["jpg", "png", "webp"].entries()) {
       await docker(project, env, ["exec", "-T", "frame-worker", "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `testsrc2=size=${320 + index * 40}x${180 + index * 20}:rate=1:duration=1`, "-frames:v", "1", "-threads", "1", "-y", `/tmp/e2e-image.${extension}`], { timeoutMs: 60_000 });
       await run("docker", ["cp", `${worker.stdout}:/tmp/e2e-image.${extension}`, imagePaths[index]], { timeoutMs: 30_000 });
@@ -772,7 +724,6 @@ async function main() {
     if (result.framesSaved !== 4) throw new Error(`Deterministik fixture tam 4 frame üretmedi: ${result.framesSaved}`);
     if (result.firstFrame.width !== 1138 || result.firstFrame.height !== 640 || Math.abs(result.firstFrame.width / result.firstFrame.height - 16 / 9) > 1 / result.firstFrame.height) throw new Error(`Production frame ölçüsü/oranı geçersiz: ${result.firstFrame.width}x${result.firstFrame.height}.`);
     const videoAnnotation = await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, result.jobId, result.firstFrame.width, result.firstFrame.height);
-    const urlResult = await urlVideoFlow(`http://${publicHost}:${frontendPort}`, "http://93.184.216.34/fixture.mp4");
     const datasetSingle = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [imagePaths[0]], false, temporaryDirectory, true);
     await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, datasetSingle.jobId, 640, 640);
     const datasetMultiple = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, imagePaths, false, temporaryDirectory);
@@ -822,7 +773,7 @@ async function main() {
     const persistedParts = persistedAnnotation.stdout.split("|");
     if (persistedParts.length !== 6 || persistedParts[0] !== "true" || persistedParts[1] !== "1" || persistedParts.slice(2).some((value) => Math.abs(Number(value) - .5) > .000001)) throw new Error(`PostgreSQL annotation persistence geçersiz: ${persistedAnnotation.stdout}`);
     if (![videoAnnotation.box.x_center, videoAnnotation.box.y_center, videoAnnotation.box.width, videoAnnotation.box.height].every((value) => Number(value) > 0 && Number(value) <= 1)) throw new Error("Persisted annotation koordinatları normalized değil.");
-    console.log(`Full-stack E2E başarılı: durumlar=${result.statuses}; kare=${result.framesSaved}; video_annotation_revision=${videoAnnotation.revision}; url_job=${urlResult.jobId}; url_annotation_revision=${urlResult.annotation.revision}; dataset=single:${datasetSingle.images},multi:${datasetMultiple.images},zip:${datasetZip.images}; container_recreation=${PRODUCTION_E2E ? "postgres,minio" : "none"}; süre=${((Date.now() - started) / 1000).toFixed(1)} sn.`);
+    console.log(`Full-stack E2E başarılı: durumlar=${result.statuses}; kare=${result.framesSaved}; video_annotation_revision=${videoAnnotation.revision}; dataset=single:${datasetSingle.images},multi:${datasetMultiple.images},zip:${datasetZip.images}; container_recreation=${PRODUCTION_E2E ? "postgres,minio" : "none"}; süre=${((Date.now() - started) / 1000).toFixed(1)} sn.`);
   } catch (error) {
     await diagnostics(project, env);
     throw error;

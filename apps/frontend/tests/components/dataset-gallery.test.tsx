@@ -84,6 +84,7 @@ describe("dataset result gallery", () => {
 
   it.each([
     ["UPLOAD", "video-gallery"],
+    ["URL", "video-gallery"],
     ["IMAGE_DATASET", "Veri seti analizi"],
   ])("renders a validated successful %s result", async (sourceType, expected) => {
     getJobStatus.mockResolvedValue({
