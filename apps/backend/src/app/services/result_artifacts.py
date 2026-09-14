@@ -13,7 +13,7 @@ from uuid import UUID
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 
-from app.domain.jobs import JobStatus
+from app.domain.jobs import JobStatus, SourceType
 from app.models.processing_job import ProcessingJob
 from app.repositories.jobs import JobRepository
 from app.schemas.artifacts import (
@@ -193,11 +193,19 @@ class ResultArtifactService:
 
     async def annotation_source(
         self, job_id: UUID
-    ) -> tuple[ProcessingJob, StoredDatasetManifestV1]:
+    ) -> tuple[ProcessingJob, StoredManifestV1 | StoredDatasetManifestV1]:
         job, manifest = await self._load(job_id)
-        if not isinstance(manifest, StoredDatasetManifestV1):
+        source_type = SourceType(job.source_type)
+        if (
+            source_type is SourceType.IMAGE_DATASET
+            and isinstance(manifest, StoredDatasetManifestV1)
+        ) or (
+            source_type in {SourceType.URL, SourceType.UPLOAD}
+            and isinstance(manifest, StoredManifestV1)
+        ):
+            return job, manifest
+        else:
             raise ResultUnavailableError
-        return job, manifest
 
     async def dataset_yolo_preview(
         self, job_id: UUID, run_token: UUID, image_index: int
@@ -222,6 +230,28 @@ class ResultArtifactService:
             "image/jpeg",
             self._dataset_image_max_bytes,
             file_validator=_validate_yolo_jpeg,
+        )
+
+    async def annotation_preview(
+        self, job_id: UUID, run_token: UUID, image_index: int
+    ) -> ObjectStream:
+        _job, manifest = await self.annotation_source(job_id)
+        if manifest.run_token != run_token:
+            raise ResultUnavailableError
+        if isinstance(manifest, StoredDatasetManifestV1):
+            return await self.dataset_yolo_preview(job_id, run_token, image_index)
+        if image_index < 0 or image_index >= len(manifest.frames):
+            raise ArtifactNotFoundError
+        frame = manifest.frames[image_index]
+        if frame.index != image_index:
+            raise ArtifactNotFoundError
+        return await self._verified_stream(
+            frame.object_key,
+            frame.size_bytes,
+            frame.sha256,
+            frame.content_type,
+            self._dataset_image_max_bytes,
+            file_validator=lambda path: _validate_jpeg(path, frame.width, frame.height),
         )
 
     async def _load(
@@ -369,13 +399,17 @@ class _DeletingFileBody:
 
 
 def _validate_yolo_jpeg(path: str) -> None:
+    _validate_jpeg(path, 640, 640)
+
+
+def _validate_jpeg(path: str, width: int, height: int) -> None:
     try:
         with Image.open(path) as image:
-            if image.format != "JPEG" or image.size != (640, 640):
+            if image.format != "JPEG" or image.size != (width, height):
                 raise ManifestInvalidError
             image.verify()
         with Image.open(path) as image:
-            if image.format != "JPEG" or image.size != (640, 640):
+            if image.format != "JPEG" or image.size != (width, height):
                 raise ManifestInvalidError
             image.load()
     except (

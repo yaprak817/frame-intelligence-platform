@@ -79,6 +79,66 @@ function verifyRedaction() {
   console.log("Tanı redaksiyonu sahte örneklerle doğrulandı.");
 }
 
+function requestCategory(url, resourceType) {
+  const parsed = new URL(url);
+  if (/^\/api\/v1\/(?:jobs\/[^/]+\/)?annotations(?:\/|$)/.test(parsed.pathname)) return "annotation-api";
+  if (parsed.pathname.startsWith("/_next/")) return "next-asset";
+  if (resourceType === "document") return "document";
+  return "other";
+}
+
+function assertSameOriginRequests(requests, expectedOrigin) {
+  const safeRecords = [];
+  const seen = new Set();
+  for (const request of requests) {
+    const origin = new URL(request.url).origin;
+    if (origin === expectedOrigin) continue;
+    const record = {
+      origin,
+      expectedOrigin,
+      resourceType: request.resourceType,
+      navigation: request.isNavigationRequest,
+      frame: request.isMainFrame ? "main-frame" : "subframe",
+      category: request.isInitialNavigation ? "initial-navigation-redirect" : requestCategory(request.url, request.resourceType),
+    };
+    const key = JSON.stringify(record);
+    if (!seen.has(key) && safeRecords.length < 10) {
+      seen.add(key);
+      safeRecords.push(record);
+    }
+  }
+  if (safeRecords.length > 0) {
+    throw new Error(`Annotation akışında cross-origin istek bulundu. Güvenli tanı: ${JSON.stringify(safeRecords)}`);
+  }
+}
+
+function verifySameOriginAssertion() {
+  const expectedOrigin = "http://127.0.0.1:3000";
+  assertSameOriginRequests([{ url: `${expectedOrigin}/api/v1/annotations/projects`, resourceType: "fetch", isNavigationRequest: false, isMainFrame: true, isInitialNavigation: false }], expectedOrigin);
+  const measurementWindow = [{ url: "http://storage.example.test/stale-result-request", resourceType: "image", isNavigationRequest: false, isMainFrame: true, isInitialNavigation: false }];
+  measurementWindow.length = 0;
+  measurementWindow.push({ url: `${expectedOrigin}/api/v1/annotations/projects`, resourceType: "fetch", isNavigationRequest: false, isMainFrame: true, isInitialNavigation: false });
+  assertSameOriginRequests(measurementWindow, expectedOrigin);
+  let rejected = false;
+  try {
+    assertSameOriginRequests([{ url: "http://storage.example.test/private/frame.jpg", resourceType: "image", isNavigationRequest: false, isMainFrame: true, isInitialNavigation: false }], expectedOrigin);
+  } catch (error) {
+    rejected = error instanceof Error
+      && error.message.startsWith("Annotation akışında cross-origin istek bulundu.")
+      && error.message.includes('"origin":"http://storage.example.test"')
+      && !error.message.includes("/private/frame.jpg");
+  }
+  if (!rejected) throw new Error("Cross-origin negatif kontrolü kasıtlı isteği reddetmedi.");
+  let redirectClassified = false;
+  try {
+    assertSameOriginRequests([{ url: "http://localhost:3000/annotation", resourceType: "document", isNavigationRequest: true, isMainFrame: true, isInitialNavigation: true }], expectedOrigin);
+  } catch (error) {
+    redirectClassified = error instanceof Error && error.message.includes('"category":"initial-navigation-redirect"');
+  }
+  if (!redirectClassified) throw new Error("Başlangıç navigation/redirect isteği ayrı sınıflandırılmadı.");
+  console.log("Annotation same-origin assertion pozitif ve negatif örneklerle doğrulandı.");
+}
+
 function run(command, args, { env, timeoutMs = 120_000, capture = true, allowFailure = false } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(command, args, {
@@ -298,6 +358,84 @@ function assertExportManifestIsPublic(manifest, jobId) {
   }
 }
 
+async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeight) {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const requested = [];
+  let requestListener;
+  try {
+    await page.goto(`${baseUrl}/jobs/${jobId}/result`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await page.waitForLoadState("networkidle", { timeout: 30_000 });
+    requested.length = 0;
+    let initialNavigationSeen = false;
+    requestListener = (request) => {
+      const isNavigationRequest = request.isNavigationRequest();
+      const isMainFrame = request.frame() === page.mainFrame();
+      const isInitialNavigation = isNavigationRequest && isMainFrame && !initialNavigationSeen;
+      if (isInitialNavigation) initialNavigationSeen = true;
+      requested.push({
+        url: request.url(),
+        resourceType: request.resourceType(),
+        isNavigationRequest,
+        isMainFrame,
+        isInitialNavigation,
+      });
+    };
+    page.on("request", requestListener);
+    await page.getByRole("link", { name: "Etiketlemeye başla" }).click();
+    await page.getByRole("heading", { name: "Frame ve görsel galerisi" }).waitFor({ state: "visible", timeout: 30_000 });
+    const expectedOrigin = new URL(page.url()).origin;
+    const firstCard = page.locator("a.annotation-card").first();
+    await firstCard.waitFor({ state: "visible", timeout: 30_000 });
+    await firstCard.click();
+    const image = page.locator(".annotation-canvas img");
+    await image.waitFor({ state: "visible", timeout: 30_000 });
+    await image.evaluate((node) => new Promise((resolveImage, rejectImage) => {
+      if (node.complete && node.naturalWidth > 0) return resolveImage();
+      node.addEventListener("load", resolveImage, { once: true });
+      node.addEventListener("error", rejectImage, { once: true });
+    }));
+    const dimensions = await image.evaluate((node) => [node.naturalWidth, node.naturalHeight]);
+    if (dimensions[0] !== expectedWidth || dimensions[1] !== expectedHeight) throw new Error(`Annotation preview boyutu geçersiz: ${dimensions.join("x")}.`);
+    await page.getByLabel("Yeni sınıf adı").fill("Araç");
+    const classResponsePromise = page.waitForResponse((response) => response.request().method() === "POST" && /\/annotations\/classes$/.test(new URL(response.url()).pathname), { timeout: 30_000 });
+    await page.getByRole("button", { name: "Sınıf ekle" }).click();
+    if ((await classResponsePromise).status() !== 200) throw new Error("Annotation class oluşturma cevabı geçersiz.");
+    await page.getByRole("button", { name: "Araç", exact: true }).click();
+    const canvas = page.getByLabel("Bounding box çalışma alanı");
+    const bounds = await canvas.boundingBox();
+    if (!bounds) throw new Error("Annotation canvas bounds bulunamadı.");
+    const imageBounds = await image.boundingBox();
+    if (!imageBounds || Math.abs(bounds.width / bounds.height - expectedWidth / expectedHeight) > .01 || Math.abs(bounds.width - imageBounds.width) > 1 || Math.abs(bounds.height - imageBounds.height) > 1) throw new Error("Annotation canvas/SVG gerçek frame alanıyla eşleşmiyor.");
+    await page.mouse.move(bounds.x + bounds.width * .25, bounds.y + bounds.height * .25);
+    await page.mouse.down();
+    await page.mouse.move(bounds.x + bounds.width * .75, bounds.y + bounds.height * .75);
+    await page.mouse.up();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll("button")).some((button) => button.textContent === "Kaydet" && !button.disabled), undefined, { timeout: 10_000 });
+    const [saved] = await Promise.all([
+      page.waitForResponse((response) => response.request().method() === "PUT" && /\/annotations\/images\/\d+$/.test(new URL(response.url()).pathname), { timeout: 30_000 }),
+      page.getByRole("button", { name: "Kaydet", exact: true }).click(),
+    ]);
+    const savedBody = await saved.json();
+    if (saved.status() !== 200 || savedBody.project_revision < 2 || savedBody.completed !== true || savedBody.boxes?.length !== 1) throw new Error("Annotation save/revision response geçersiz.");
+    const box = savedBody.boxes[0];
+    if ([box.x_center, box.y_center, box.width, box.height].some((value) => Math.abs(Number(value) - .5) > .000001)) throw new Error("Annotation normalized koordinatları beklenen %25-%75 kutusuyla eşleşmiyor.");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByLabel("Bounding box çalışma alanı").waitFor({ state: "visible", timeout: 30_000 });
+    if (await page.locator("rect[data-box-id]:not([data-handle])").count() !== 1) throw new Error("Annotation refresh persistence doğrulanamadı.");
+    await page.getByRole("link", { name: "Galeriye dön" }).click();
+    await page.getByText("MANUEL ETİKETLENDİ").first().waitFor({ state: "visible", timeout: 30_000 });
+    assertSameOriginRequests(requested, expectedOrigin);
+    if (/backend:8000|minio:9000|run_token|object_key|bucket/i.test(await page.content())) throw new Error("Annotation DOM internal storage verisi içeriyor.");
+    return { revision: savedBody.project_revision, box };
+  } finally {
+    if (requestListener) page.off("request", requestListener);
+    await context.close();
+    await browser.close();
+  }
+}
+
 async function browserFlow(baseUrl, videoPath) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ acceptDownloads: true });
@@ -460,7 +598,7 @@ async function browserFlow(baseUrl, videoPath) {
     for (const [index, exported] of allZip.manifest.frames.entries()) {
       if (exported.index !== index || allZip.hashes[exported.filename] !== manifest.frames[index].sha256) throw new Error("Tüm-frame ZIP sıra/hash geçersiz.");
     }
-    return { statuses: statuses.join(" -> "), framesSaved, jobId };
+    return { statuses: statuses.join(" -> "), framesSaved, jobId, firstFrame: manifest.frames[0] };
   } finally {
     await context.close();
     await browser.close();
@@ -504,6 +642,7 @@ async function main() {
   const project = projectName();
   const mode = process.argv[2] ?? "run";
   if (mode === "--redaction-self-test") return verifyRedaction();
+  if (mode === "--request-origin-self-test") return verifySameOriginAssertion();
   const publicHost = process.env.FULL_STACK_E2E_PUBLIC_HOST ?? "127.0.0.1";
   if (!["127.0.0.1", "host.docker.internal"].includes(publicHost)) throw new Error("FULL_STACK_E2E_PUBLIC_HOST izin verilen bir host değil.");
   const frontendPort = await freePort();
@@ -583,7 +722,10 @@ async function main() {
     await run("python", ["-c", "import os,sys,zipfile;z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED);[z.write(p,'safe/'+os.path.basename(p)) for p in sys.argv[2:]];z.close()", archivePath, ...imagePaths], { timeoutMs: 30_000 });
     const result = await browserFlow(`http://${publicHost}:${frontendPort}`, videoPath);
     if (result.framesSaved !== 4) throw new Error(`Deterministik fixture tam 4 frame üretmedi: ${result.framesSaved}`);
+    if (result.firstFrame.width !== 1138 || result.firstFrame.height !== 640 || Math.abs(result.firstFrame.width / result.firstFrame.height - 16 / 9) > 1 / result.firstFrame.height) throw new Error(`Production frame ölçüsü/oranı geçersiz: ${result.firstFrame.width}x${result.firstFrame.height}.`);
+    const videoAnnotation = await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, result.jobId, result.firstFrame.width, result.firstFrame.height);
     const datasetSingle = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [imagePaths[0]], false, temporaryDirectory, true);
+    await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, datasetSingle.jobId, 640, 640);
     const datasetMultiple = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, imagePaths, false, temporaryDirectory);
     const datasetZip = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [archivePath], true, temporaryDirectory);
     if (PRODUCTION_E2E) {
@@ -627,7 +769,11 @@ async function main() {
         throw new Error("Restart sonrası kalıcı manifest doğrulanamadı.");
       }
     }
-    console.log(`Full-stack E2E başarılı: durumlar=${result.statuses}; kare=${result.framesSaved}; dataset=single:${datasetSingle.images},multi:${datasetMultiple.images},zip:${datasetZip.images}; container_recreation=${PRODUCTION_E2E ? "postgres,minio" : "none"}; süre=${((Date.now() - started) / 1000).toFixed(1)} sn.`);
+    const persistedAnnotation = await docker(project, env, ["exec", "-T", "postgres", "psql", "-U", env.POSTGRES_USER, "-d", env.POSTGRES_DB, "-At", "-c", `SELECT i.completed::text || '|' || count(b.id)::text || '|' || min(b.x_center)::text || '|' || min(b.y_center)::text || '|' || min(b.width)::text || '|' || min(b.height)::text FROM annotation_images i JOIN annotation_projects p ON p.id=i.project_id LEFT JOIN annotation_boxes b ON b.project_id=i.project_id AND b.image_index=i.image_index WHERE p.job_id='${result.jobId}' AND i.image_index=0 GROUP BY i.completed;`], { timeoutMs: 30_000 });
+    const persistedParts = persistedAnnotation.stdout.split("|");
+    if (persistedParts.length !== 6 || persistedParts[0] !== "true" || persistedParts[1] !== "1" || persistedParts.slice(2).some((value) => Math.abs(Number(value) - .5) > .000001)) throw new Error(`PostgreSQL annotation persistence geçersiz: ${persistedAnnotation.stdout}`);
+    if (![videoAnnotation.box.x_center, videoAnnotation.box.y_center, videoAnnotation.box.width, videoAnnotation.box.height].every((value) => Number(value) > 0 && Number(value) <= 1)) throw new Error("Persisted annotation koordinatları normalized değil.");
+    console.log(`Full-stack E2E başarılı: durumlar=${result.statuses}; kare=${result.framesSaved}; video_annotation_revision=${videoAnnotation.revision}; dataset=single:${datasetSingle.images},multi:${datasetMultiple.images},zip:${datasetZip.images}; container_recreation=${PRODUCTION_E2E ? "postgres,minio" : "none"}; süre=${((Date.now() - started) / 1000).toFixed(1)} sn.`);
   } catch (error) {
     await diagnostics(project, env);
     throw error;

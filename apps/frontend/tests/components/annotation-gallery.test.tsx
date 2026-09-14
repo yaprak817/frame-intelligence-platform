@@ -11,6 +11,9 @@ const jobId = "11111111-1111-4111-8111-111111111111";
 const images = Array.from({ length: 13 }, (_, index) => ({
   index,
   filename: `${index}.jpg`,
+  width: 640,
+  height: 640,
+  timestamp_ms: index === 0 ? 1250 : null,
   completed: index === 0,
   box_count: index === 0 ? 1 : 0,
   preview_url: `/api/v1/jobs/${jobId}/annotations/images/${index}/preview`,
@@ -32,6 +35,8 @@ describe("annotation gallery", () => {
     const first = screen.getByRole("link", { name: /^0\.jpg/ });
     expect(first).toHaveAttribute("href", `/jobs/${jobId}/annotations/0`);
     expect(screen.getByRole("img", { name: "0.jpg" })).toHaveAttribute("loading", "lazy");
+    expect(screen.getByText("1.250 sn")).toBeVisible();
+    expect(screen.getAllByText("640×640").length).toBeGreaterThan(0);
     expect(document.body.innerHTML).not.toMatch(/backend:8000|minio:9000|run_token|object_key|bucket/i);
   });
 

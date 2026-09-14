@@ -25,6 +25,7 @@ from app.schemas.annotations import (
     PutImageAnnotationsRequest,
     UpdateAnnotationClassRequest,
 )
+from app.schemas.artifacts import StoredDatasetManifestV1
 from app.services.result_artifacts import ResultArtifactService
 from app.storage.s3 import ObjectStream
 
@@ -87,10 +88,9 @@ class AnnotationService:
 
     async def get_or_create(self, job_id: UUID) -> tuple[AnnotationProject, bool]:
         job, manifest = await self.results.annotation_source(job_id)
-        if (
-            JobStatus(job.status) is not JobStatus.SUCCEEDED
-            or SourceType(job.source_type) is not SourceType.IMAGE_DATASET
-        ):
+        if JobStatus(job.status) is not JobStatus.SUCCEEDED or SourceType(
+            job.source_type
+        ) not in {SourceType.IMAGE_DATASET, SourceType.URL, SourceType.UPLOAD}:
             raise AnnotationNotAvailable
         existing = await self._project(job_id, manifest.run_token)
         if existing:
@@ -104,22 +104,33 @@ class AnnotationService:
             created_at=now,
             updated_at=now,
         )
+        source_images = (
+            [
+                (image.index, image.filename, image.sha256, image.yolo_sha256)
+                for image in manifest.images
+                if image.quality_category in {"normal", "challenging"}
+                and image.object_key is not None
+                and image.yolo_object_key is not None
+                and image.output_width == 640
+                and image.output_height == 640
+            ]
+            if isinstance(manifest, StoredDatasetManifestV1)
+            else [
+                (frame.index, frame.filename, frame.sha256, frame.sha256)
+                for frame in manifest.frames
+            ]
+        )
         images = [
             AnnotationImage(
                 project_id=project.id,
-                image_index=image.index,
-                image_filename=image.filename,
-                image_sha256=image.sha256,
-                yolo_sha256=image.yolo_sha256,
+                image_index=index,
+                image_filename=filename,
+                image_sha256=image_sha256,
+                yolo_sha256=preview_sha256,
                 completed=False,
                 updated_at=now,
             )
-            for image in manifest.images
-            if image.quality_category in {"normal", "challenging"}
-            and image.object_key is not None
-            and image.yolo_object_key is not None
-            and image.output_width == 640
-            and image.output_height == 640
+            for index, filename, image_sha256, preview_sha256 in source_images
         ]
         try:
             self.session.add(project)
@@ -136,8 +147,6 @@ class AnnotationService:
 
     async def get(self, job_id: UUID) -> AnnotationProject:
         job, manifest = await self.results.annotation_source(job_id)
-        if SourceType(job.source_type) is not SourceType.IMAGE_DATASET:
-            raise AnnotationNotAvailable
         project = await self._project(job_id, manifest.run_token)
         if project is None:
             raise AnnotationNotAvailable
@@ -146,6 +155,25 @@ class AnnotationService:
     async def response(
         self, project: AnnotationProject, page: int, page_size: int
     ) -> AnnotationProjectResponse:
+        _job, manifest = await self.results.annotation_source(project.job_id)
+        if manifest.run_token != project.result_run_token:
+            raise AnnotationSourceChanged
+        metadata = (
+            {
+                image.index: (image.output_width, image.output_height, None)
+                for image in manifest.images
+                if image.quality_category in {"normal", "challenging"}
+                and image.object_key is not None
+                and image.yolo_object_key is not None
+                and image.output_width == 640
+                and image.output_height == 640
+            }
+            if isinstance(manifest, StoredDatasetManifestV1)
+            else {
+                frame.index: (frame.width, frame.height, frame.timestamp_ms)
+                for frame in manifest.frames
+            }
+        )
         classes = list(
             (
                 await self.session.scalars(
@@ -178,6 +206,8 @@ class AnnotationService:
                 .limit(page_size)
             )
         ).all()
+        if any(image.image_index not in metadata for image, _count in rows):
+            raise AnnotationSourceChanged
         return AnnotationProjectResponse(
             id=project.id,
             job_id=project.job_id,
@@ -187,6 +217,9 @@ class AnnotationService:
                 AnnotationImageSummary(
                     index=image.image_index,
                     filename=image.image_filename,
+                    width=metadata[image.image_index][0],
+                    height=metadata[image.image_index][1],
+                    timestamp_ms=metadata[image.image_index][2],
                     completed=image.completed,
                     box_count=count,
                     preview_url=f"/api/v1/jobs/{project.job_id}/annotations/images/{image.image_index}/preview",
@@ -402,7 +435,7 @@ class AnnotationService:
         if image is None:
             raise AnnotationImageNotFound
         try:
-            return await self.results.dataset_yolo_preview(
+            return await self.results.annotation_preview(
                 project.job_id, project.result_run_token, image_index
             )
         except Exception as error:

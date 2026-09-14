@@ -84,6 +84,7 @@ describe("dataset result gallery", () => {
 
   it.each([
     ["UPLOAD", "video-gallery"],
+    ["URL", "video-gallery"],
     ["IMAGE_DATASET", "Veri seti analizi"],
   ])("renders a validated successful %s result", async (sourceType, expected) => {
     getJobStatus.mockResolvedValue({
@@ -104,8 +105,7 @@ describe("dataset result gallery", () => {
     });
     render(<ResultView jobId="11111111-1111-4111-8111-111111111111" />);
     expect(await screen.findByText(expected)).toBeVisible();
-    if (sourceType === "IMAGE_DATASET") expect(screen.getByRole("link", { name: "Etiketlemeye başla" })).toHaveAttribute("href", `/jobs/${jobId}/annotations`);
-    else expect(screen.queryByRole("link", { name: "Etiketlemeye başla" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Etiketlemeye başla" })).toHaveAttribute("href", `/jobs/${jobId}/annotations`);
   });
 
   it("rejects a source and result discriminator mismatch", async () => {

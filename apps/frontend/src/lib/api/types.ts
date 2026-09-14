@@ -118,7 +118,8 @@ export interface AnnotationClass {
   id: string; yolo_index: number; name: string; color: string;
 }
 export interface AnnotationImageSummary {
-  index: number; filename: string; completed: boolean; box_count: number; preview_url: string;
+  index: number; filename: string; width: number; height: number; timestamp_ms: number | null;
+  completed: boolean; box_count: number; preview_url: string;
 }
 export interface AnnotationProject {
   id: string; job_id: string; revision: number; classes: AnnotationClass[];
