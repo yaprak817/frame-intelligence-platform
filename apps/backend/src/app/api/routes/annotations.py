@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import (
     APIRouter,
     Depends,
+    Header,
     HTTPException,
     Path,
     Query,
@@ -13,7 +14,17 @@ from fastapi import (
 )
 from starlette.responses import StreamingResponse
 
-from app.api.dependencies import authorize_result_access, get_annotation_service
+from app.api.dependencies import (
+    authorize_result_access,
+    get_annotation_service,
+    get_annotation_training_service,
+)
+from app.api.routes.jobs import _idempotency_key
+from app.schemas.annotation_training import (
+    AnnotationTrainingPage,
+    AnnotationTrainingResponse,
+    CreateAnnotationTrainingRequest,
+)
 from app.schemas.annotations import (
     AnnotationClassMutationResponse,
     AnnotationProjectResponse,
@@ -22,6 +33,18 @@ from app.schemas.annotations import (
     PutImageAnnotationsRequest,
     RevisionRequest,
     UpdateAnnotationClassRequest,
+)
+from app.services.annotation_training import (
+    AnnotationTrainingError,
+    AnnotationTrainingIdempotencyConflict,
+    AnnotationTrainingInsufficientImages,
+    AnnotationTrainingInvalidDataset,
+    AnnotationTrainingNotFound,
+    AnnotationTrainingRevisionAlreadySnapshotted,
+    AnnotationTrainingRevisionConflict,
+    AnnotationTrainingService,
+    AnnotationTrainingSnapshotLimitReached,
+    AnnotationTrainingSourceChanged,
 )
 from app.services.annotations import (
     AnnotationClassInUse,
@@ -45,6 +68,9 @@ from app.storage.s3 import ObjectStorageError
 
 router = APIRouter(prefix="/jobs/{job_id}/annotations")
 Service = Annotated[AnnotationService, Depends(get_annotation_service)]
+TrainingService = Annotated[
+    AnnotationTrainingService, Depends(get_annotation_training_service)
+]
 Authorization = Annotated[None, Depends(authorize_result_access)]
 
 
@@ -133,6 +159,165 @@ def api_error(error: Exception) -> HTTPException:
             "message": "Annotation service is unavailable",
         },
     )
+
+
+def training_api_error(error: Exception) -> HTTPException:
+    mapping: list[tuple[type[Exception], int, str, str]] = [
+        (
+            AnnotationTrainingSnapshotLimitReached,
+            409,
+            "ANNOTATION_TRAINING_SNAPSHOT_LIMIT_REACHED",
+            "Annotation training snapshot limit was reached",
+        ),
+        (
+            AnnotationTrainingRevisionAlreadySnapshotted,
+            409,
+            "ANNOTATION_TRAINING_REVISION_ALREADY_SNAPSHOTTED",
+            "This annotation revision already has a training snapshot",
+        ),
+        (
+            AnnotationTrainingRevisionConflict,
+            409,
+            "ANNOTATION_REVISION_CONFLICT",
+            "Annotation was changed by another request",
+        ),
+        (
+            AnnotationTrainingIdempotencyConflict,
+            409,
+            "ANNOTATION_TRAINING_IDEMPOTENCY_CONFLICT",
+            "Idempotency-Key was already used for a different request",
+        ),
+        (
+            AnnotationTrainingInsufficientImages,
+            422,
+            "ANNOTATION_TRAINING_INSUFFICIENT_IMAGES",
+            "At least 50 completed images are required",
+        ),
+        (
+            AnnotationTrainingInvalidDataset,
+            422,
+            "ANNOTATION_TRAINING_INVALID_DATASET",
+            "Annotation snapshot is not eligible for training",
+        ),
+        (
+            AnnotationTrainingSourceChanged,
+            409,
+            "ANNOTATION_SOURCE_CHANGED",
+            "Annotation source has changed",
+        ),
+        (
+            AnnotationTrainingNotFound,
+            404,
+            "ANNOTATION_TRAINING_NOT_FOUND",
+            "Annotation training was not found",
+        ),
+    ]
+    for kind, code, public_code, message in mapping:
+        if isinstance(error, kind):
+            return HTTPException(code, detail={"code": public_code, "message": message})
+    if isinstance(error, AnnotationTrainingError):
+        return HTTPException(
+            422,
+            detail={
+                "code": error.code,
+                "message": "Annotation training is not available",
+            },
+        )
+    return HTTPException(
+        503,
+        detail={
+            "code": "ANNOTATION_TRAINING_UNAVAILABLE",
+            "message": "Annotation training service is unavailable",
+        },
+    )
+
+
+def _canonical_path_uuid(raw_value: str) -> UUID:
+    try:
+        value = UUID(raw_value)
+    except (ValueError, AttributeError) as error:
+        raise HTTPException(422, detail="Invalid canonical UUID") from error
+    if str(value) != raw_value:
+        raise HTTPException(422, detail="Invalid canonical UUID")
+    return value
+
+
+def _bounded_query_integer(
+    raw_value: str | None, *, default: int | None, minimum: int, maximum: int
+) -> int | None:
+    if raw_value is None:
+        return default
+    if not raw_value.isascii() or not raw_value.isdigit():
+        raise HTTPException(422, detail="Invalid pagination value")
+    value = int(raw_value)
+    if not minimum <= value <= maximum:
+        raise HTTPException(422, detail="Invalid pagination value")
+    return value
+
+
+@router.post(
+    "/trainings",
+    response_model=AnnotationTrainingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_training(
+    job_id: str,
+    body: CreateAnnotationTrainingRequest,
+    response: Response,
+    service: TrainingService,
+    _authorization: Authorization,
+    idempotency_key_header: Annotated[
+        str | None, Header(alias="Idempotency-Key")
+    ] = None,
+) -> AnnotationTrainingResponse:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    key = _idempotency_key(idempotency_key_header)
+    try:
+        item, created = await service.create(parsed_job_id, body, key)
+    except Exception as error:
+        raise training_api_error(error) from error
+    response.status_code = 201 if created else 200
+    response.headers["Cache-Control"] = "no-store"
+    return item
+
+
+@router.get("/trainings", response_model=AnnotationTrainingPage)
+async def list_trainings(
+    job_id: str,
+    service: TrainingService,
+    _authorization: Authorization,
+    limit: Annotated[str | None, Query()] = None,
+    after_snapshot_version: Annotated[str | None, Query()] = None,
+) -> AnnotationTrainingPage:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    parsed_limit = _bounded_query_integer(limit, default=20, minimum=1, maximum=50)
+    parsed_cursor = _bounded_query_integer(
+        after_snapshot_version, default=None, minimum=0, maximum=2**63 - 1
+    )
+    assert parsed_limit is not None
+    try:
+        return await service.list_runs(
+            parsed_job_id,
+            limit=parsed_limit,
+            after_snapshot_version=parsed_cursor,
+        )
+    except Exception as error:
+        raise training_api_error(error) from error
+
+
+@router.get("/trainings/{training_id}", response_model=AnnotationTrainingResponse)
+async def get_training(
+    job_id: str,
+    training_id: str,
+    service: TrainingService,
+    _authorization: Authorization,
+) -> AnnotationTrainingResponse:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    parsed_training_id = _canonical_path_uuid(training_id)
+    try:
+        return await service.get(parsed_job_id, parsed_training_id)
+    except Exception as error:
+        raise training_api_error(error) from error
 
 
 async def project(service: AnnotationService, job_id: UUID):

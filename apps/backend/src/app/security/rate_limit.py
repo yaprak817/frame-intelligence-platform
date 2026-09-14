@@ -182,9 +182,20 @@ _DATASET_DOWNLOAD_PATH = re.compile(
 _ANNOTATION_PATH = re.compile(
     r"^/api/v1/jobs/[0-9a-fA-F-]{36}/annotations(?:/classes(?:/[0-9a-fA-F-]{36})?|/images/[0-9]+(?:/preview)?)?$"
 )
+_ANNOTATION_TRAINING_PATH = re.compile(
+    r"^/api/v1/jobs/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}/annotations/trainings"
+    r"(?:/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12})?$"
+)
 
 
 def protected_group(method: str, path: str) -> tuple[str, str] | None:
+    if _ANNOTATION_TRAINING_PATH.fullmatch(path):
+        if method == "POST" and path.endswith("/trainings"):
+            return "annotation-snapshot", "rate_limit_annotation_snapshot_requests"
+        if method == "GET":
+            return "annotation-read", "rate_limit_annotation_read_requests"
     if method == "POST" and path in {
         "/api/v1/jobs/upload",
         "/api/v1/jobs/url",
@@ -222,7 +233,10 @@ class RateLimitMiddleware:
             return
         group, limit_setting = match
         settings = scope["app"].state.settings
-        if _ANNOTATION_PATH.fullmatch(scope["path"]) and scope["method"] in {
+        if (
+            _ANNOTATION_PATH.fullmatch(scope["path"])
+            or _ANNOTATION_TRAINING_PATH.fullmatch(scope["path"])
+        ) and scope["method"] in {
             "POST",
             "PUT",
             "PATCH",
@@ -305,7 +319,10 @@ class RateLimitMiddleware:
                     413, "DATASET_TOO_LARGE", "Dataset upload is too large"
                 )(scope, receive, send)
             return
-        if _ANNOTATION_PATH.fullmatch(scope["path"]) and scope["method"] in {
+        if (
+            _ANNOTATION_PATH.fullmatch(scope["path"])
+            or _ANNOTATION_TRAINING_PATH.fullmatch(scope["path"])
+        ) and scope["method"] in {
             "POST",
             "PUT",
             "PATCH",
