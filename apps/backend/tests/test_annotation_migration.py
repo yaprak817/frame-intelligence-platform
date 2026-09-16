@@ -123,6 +123,41 @@ def run_alembic(*arguments: str, check: bool = True) -> subprocess.CompletedProc
     )
 
 
+def current_revision() -> str:
+    return run_alembic("current").stdout.split()[0]
+
+
+async def assert_restored_revision(expected_revision: str) -> None:
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    try:
+        async with engine.connect() as connection:
+            revision = await connection.scalar(
+                sa.text("SELECT version_num FROM alembic_version")
+            )
+            outbox = await connection.scalar(
+                sa.text("SELECT to_regclass('annotation_training_outbox')")
+            )
+        assert revision == expected_revision
+        if expected_revision == "20260914_0008":
+            assert outbox == "annotation_training_outbox"
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+def restore_database_revision():
+    initial_revision = current_revision()
+    try:
+        yield initial_revision
+    finally:
+        run_alembic("upgrade", initial_revision)
+        if sys.platform == "win32":
+            with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+                runner.run(assert_restored_revision(initial_revision))
+        else:
+            asyncio.run(assert_restored_revision(initial_revision))
+
+
 async def seed_annotation_project() -> tuple:
     engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
     job_id, project_id = uuid4(), uuid4()
@@ -301,7 +336,9 @@ async def remove_annotation_project(job_id, project_id) -> dict[str, int]:
     os.environ.get("TEST_DATABASE_URL") is None,
     reason="TEST_DATABASE_URL is required for PostgreSQL integration tests",
 )
-def test_real_postgres_migration_downgrade_refuses_with_data() -> None:
+def test_real_postgres_migration_downgrade_refuses_with_data(
+    restore_database_revision,
+) -> None:
     run_alembic("upgrade", "head")
     assert "20260914_0008" in run_alembic("current").stdout
     if sys.platform == "win32":
@@ -354,7 +391,7 @@ def test_real_postgres_migration_downgrade_refuses_with_data() -> None:
     os.environ.get("TEST_DATABASE_URL") is None,
     reason="TEST_DATABASE_URL is required for PostgreSQL integration tests",
 )
-def test_real_postgres_migration_clean_round_trip() -> None:
+def test_real_postgres_migration_clean_round_trip(restore_database_revision) -> None:
     run_alembic("upgrade", "20260914_0007")
     if sys.platform == "win32":
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
