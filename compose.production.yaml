@@ -172,6 +172,38 @@ services:
     tmpfs: [/tmp/frame-intelligence:mode=1777]
     restart: unless-stopped
 
+  ml-worker:
+    build: {context: ./services/frame-worker, dockerfile: Dockerfile.ml}
+    command: ["celery", "--quiet", "-A", "frame_worker.orchestration.celery_app:celery_app", "worker", "--loglevel=WARNING", "--queues=annotation-ml", "--concurrency=1", "--hostname=annotation-ml@%h"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?required}:${POSTGRES_PASSWORD:?required}@postgres:5432/${POSTGRES_DB:?required}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      JOB_SOURCE_ENCRYPTION_KEY: ${JOB_SOURCE_ENCRYPTION_KEY:?required}
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:?required}
+      OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?required}
+      OBJECT_STORAGE_BUCKET: ${MINIO_BUCKET:?required}
+      OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+      OBJECT_STORAGE_ADDRESSING_STYLE: path
+      CELERY_VISIBILITY_TIMEOUT_SECONDS: ${CELERY_VISIBILITY_TIMEOUT_SECONDS:-7200}
+      CELERY_WORKER_CONCURRENCY: "1"
+      CELERY_TASK_QUEUE: annotation-ml
+      PROCESSING_TEMP_ROOT: /tmp/frame-intelligence
+      YOLO_MODEL_PATH: /opt/models/yolo11n.pt
+    networks: [data]
+    depends_on:
+      backend: {condition: service_healthy}
+    cpus: 2
+    mem_limit: 6g
+    pids_limit: 256
+    tmpfs: ["/tmp/frame-intelligence:mode=1777,size=2g"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A frame_worker.orchestration.celery_app:celery_app inspect ping -d annotation-ml@$$HOSTNAME --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
   postgres:
     image: postgres:17.6-alpine
     environment:

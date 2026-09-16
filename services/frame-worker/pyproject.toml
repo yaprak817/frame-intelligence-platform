@@ -17,6 +17,22 @@ dependencies = [
     "yt-dlp[curl-cffi]>=2025.1.15",
 ]
 
+[project.optional-dependencies]
+ml = [
+    "torch==2.8.0",
+    "torchvision==0.23.0",
+    "ultralytics==8.3.203",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
 [build-system]
 requires = ["setuptools>=80"]
 build-backend = "setuptools.build_meta"

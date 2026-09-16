@@ -20,6 +20,9 @@ class AnnotationTrainingStatus(StrEnum):
 
 class AnnotationTrainingConfig(StrictTrainingModel):
     max_snapshot_images: Annotated[StrictInt, Field(ge=50, le=200)] = 200
+    epochs: Annotated[StrictInt, Field(ge=1, le=25)] = 10
+    batch_size: Annotated[StrictInt, Field(ge=1, le=4)] = 2
+    image_size: Annotated[StrictInt, Field(ge=640, le=640)] = 640
 
 
 class CreateAnnotationTrainingRequest(StrictTrainingModel):
@@ -42,6 +45,18 @@ class AnnotationTrainingResponse(StrictTrainingModel):
     started_at: datetime | None
     completed_at: datetime | None
     failure_code: StrictStr | None
+    progress_completed: StrictInt = 0
+    progress_total: StrictInt = 0
+    model_version: StrictInt | None = None
+    status_url: StrictStr = "/"
+    snapshot_download_url: StrictStr | None = None
+
+
+class LatestAnnotationModelResponse(StrictTrainingModel):
+    training_id: UUID
+    model_version: StrictInt
+    snapshot_version: StrictInt
+    created_at: datetime
 
 
 class AnnotationTrainingPage(StrictTrainingModel):

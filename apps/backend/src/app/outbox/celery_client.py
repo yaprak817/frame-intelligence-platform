@@ -6,12 +6,14 @@ from celery import Celery
 PROCESS_VIDEO_TASK = "frame_worker.process_video"
 PROCESS_IMAGE_DATASET_TASK = "frame_worker.process_image_dataset"
 CREATE_FRAME_EXPORT_TASK = "frame_worker.create_frame_export"
+TRAIN_ANNOTATION_MODEL_TASK = "frame_worker.train_annotation_model"
 
 
 class JobMessagePublisher(Protocol):
     def publish(self, job_id: UUID) -> None: ...
     def publish_image_dataset(self, job_id: UUID) -> None: ...
     def publish_export(self, export_id: UUID) -> None: ...
+    def publish_training(self, training_id: UUID) -> None: ...
 
 
 class CeleryJobMessagePublisher:
@@ -20,9 +22,11 @@ class CeleryJobMessagePublisher:
         broker_url: str,
         task_queue: str = "video-processing",
         redis_keyprefix: str = "",
+        ml_task_queue: str = "annotation-ml",
     ) -> None:
         self._app = Celery("frame-intelligence-publisher", broker=broker_url)
         self._task_queue = task_queue
+        self._ml_task_queue = ml_task_queue
         self._app.conf.update(
             task_serializer="json",
             accept_content=["json"],
@@ -54,6 +58,13 @@ class CeleryJobMessagePublisher:
             CREATE_FRAME_EXPORT_TASK,
             kwargs={"export_id": str(export_id)},
             queue=self._task_queue,
+        )
+
+    def publish_training(self, training_id: UUID) -> None:
+        self._app.send_task(
+            TRAIN_ANNOTATION_MODEL_TASK,
+            kwargs={"training_id": str(training_id)},
+            queue=self._ml_task_queue,
         )
 
     def close(self) -> None:

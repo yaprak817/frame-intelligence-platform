@@ -1,4 +1,5 @@
 from app.models.annotation_training import (
+    AnnotationTrainingOutbox,
     AnnotationTrainingRun,
     AnnotationTrainingSnapshotBox,
     AnnotationTrainingSnapshotClass,
@@ -20,6 +21,7 @@ __all__ = [
     "AnnotationImage",
     "AnnotationProject",
     "AnnotationTrainingRun",
+    "AnnotationTrainingOutbox",
     "AnnotationTrainingSnapshotBox",
     "AnnotationTrainingSnapshotClass",
     "AnnotationTrainingSnapshotImage",

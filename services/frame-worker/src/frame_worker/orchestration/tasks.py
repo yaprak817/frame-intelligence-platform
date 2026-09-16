@@ -20,6 +20,15 @@ from frame_worker.orchestration.runner import (
     RetryableExecutionError,
     RetryLaterError,
 )
+from frame_worker.orchestration.training import (
+    PermanentTrainingError,
+    TrainingError,
+    TrainingLeaseBusy,
+    fail_unleased_training,
+)
+from frame_worker.orchestration.training import (
+    train_annotation_model as execute_training,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,3 +182,38 @@ def _execute_export_task(task, export_id: UUID) -> None:
             fail_unleased_export(export_id, settings)
             logger.error("Frame export retry budget exhausted export_id=%s", export_id)
             raise error from exhausted
+
+
+@celery_app.task(
+    bind=True,
+    name="frame_worker.train_annotation_model",
+    max_retries=2,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    ignore_result=True,
+    soft_time_limit=1800,
+    time_limit=1860,
+)
+def train_annotation_model(self, training_id: str) -> None:
+    try:
+        parsed = UUID(training_id)
+        if str(parsed) != training_id:
+            raise ValueError
+    except (TypeError, ValueError) as error:
+        raise Reject("Invalid training identifier", requeue=False) from error
+    try:
+        execute_training(parsed, settings)
+    except PermanentTrainingError:
+        logger.warning("Annotation training permanently failed training_id=%s", parsed)
+        raise
+    except TrainingLeaseBusy as error:
+        raise self.retry(
+            exc=error, countdown=settings.training_lease_seconds + random.uniform(1, 5)
+        ) from error
+    except TrainingError as error:
+        countdown = min(60, (2**self.request.retries) * 5) + random.uniform(0, 2)
+        try:
+            raise self.retry(exc=error, countdown=countdown) from error
+        except MaxRetriesExceededError as exhausted:
+            fail_unleased_training(parsed, settings)
+            raise TerminalTaskError("TRAINING_RETRY_EXHAUSTED") from exhausted

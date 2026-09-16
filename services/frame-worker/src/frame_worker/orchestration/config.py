@@ -82,6 +82,13 @@ class WorkerSettings:
     dataset_hard_time_limit_seconds: int = 1860
     dataset_max_temp_bytes: int = 4_400_000_000
     dataset_min_temp_free_bytes: int = 268_435_456
+    training_lease_seconds: float = 300
+    training_heartbeat_interval_seconds: float = 30
+    training_timeout_seconds: int = 1800
+    training_max_snapshot_bytes: int = 1024 * 1024 * 1024
+    training_max_model_bytes: int = 256 * 1024 * 1024
+    training_max_temp_bytes: int = 2 * 1024 * 1024 * 1024
+    yolo_model_path: Path = Path("/opt/models/yolo11n.pt")
 
     def __post_init__(self) -> None:
         if self.dataset_max_total_bytes < self.dataset_max_file_bytes:
@@ -104,6 +111,16 @@ class WorkerSettings:
             raise ValueError("Dataset hard time limit must exceed soft time limit")
         if self.dataset_max_temp_bytes < self.dataset_max_total_bytes:
             raise ValueError("Dataset temp limit must cover source bytes")
+        if self.training_heartbeat_interval_seconds >= self.training_lease_seconds / 2:
+            raise ValueError("Training heartbeat must be less than half the lease")
+        if self.training_timeout_seconds > 1800:
+            raise ValueError("Training timeout cannot exceed 30 minutes")
+        if (
+            self.training_max_snapshot_bytes > 1024 * 1024 * 1024
+            or self.training_max_model_bytes > 256 * 1024 * 1024
+            or self.training_max_temp_bytes > 2 * 1024 * 1024 * 1024
+        ):
+            raise ValueError("Training resource limits exceed the safety ceiling")
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
@@ -240,4 +257,25 @@ class WorkerSettings:
             dataset_min_temp_free_bytes=_positive_int(
                 "IMAGE_DATASET_MIN_TEMP_FREE_BYTES", "268435456"
             ),
+            training_lease_seconds=_positive_float(
+                "ANNOTATION_TRAINING_LEASE_SECONDS", "300"
+            ),
+            training_heartbeat_interval_seconds=_positive_float(
+                "ANNOTATION_TRAINING_HEARTBEAT_SECONDS", "30"
+            ),
+            training_timeout_seconds=_positive_int(
+                "ANNOTATION_TRAINING_TIMEOUT_SECONDS", "1800"
+            ),
+            training_max_snapshot_bytes=_positive_int(
+                "ANNOTATION_TRAINING_MAX_SNAPSHOT_BYTES", "1073741824"
+            ),
+            training_max_model_bytes=_positive_int(
+                "ANNOTATION_TRAINING_MAX_MODEL_BYTES", "268435456"
+            ),
+            training_max_temp_bytes=_positive_int(
+                "ANNOTATION_TRAINING_MAX_TEMP_BYTES", "2147483648"
+            ),
+            yolo_model_path=Path(
+                os.environ.get("YOLO_MODEL_PATH", "/opt/models/yolo11n.pt")
+            ).resolve(),
         )

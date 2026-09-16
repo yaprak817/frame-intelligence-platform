@@ -62,6 +62,19 @@ class FakeTrainingService:
             raise AnnotationTrainingNotFound
         return self.item
 
+    async def start(self, job_id, training_id):
+        if job_id != self.job_id or training_id != self.item.id:
+            raise AnnotationTrainingNotFound
+        created = self.item.status == AnnotationTrainingStatus.SNAPSHOT_READY
+        self.item = self.item.model_copy(
+            update={
+                "status": AnnotationTrainingStatus.PENDING,
+                "progress_total": self.item.config.epochs,
+                "completed_at": None,
+            }
+        )
+        return self.item, created
+
 
 @pytest.fixture
 def training_client():
@@ -114,6 +127,11 @@ def test_create_list_and_get_training_are_public_safe(training_client) -> None:
         "started_at",
         "completed_at",
         "failure_code",
+        "progress_completed",
+        "progress_total",
+        "model_version",
+        "status_url",
+        "snapshot_download_url",
     }
     for secret in (
         "result_run_token",
@@ -217,3 +235,17 @@ def test_unexpected_training_error_is_safe_503(training_client) -> None:
     }
     assert "sql" not in response.text.lower()
     assert "constraint" not in response.text.lower()
+
+
+def test_start_training_is_idempotent_and_foreign_safe(training_client) -> None:
+    client, service = training_client
+    path = (
+        f"/api/v1/jobs/{service.job_id}/annotations/trainings/{service.item.id}/start"
+    )
+    first = client.post(path)
+    duplicate = client.post(path)
+    foreign = client.post(path.replace(str(service.item.id), str(uuid4())))
+    assert first.status_code == 202
+    assert duplicate.status_code == 200
+    assert first.json()["status"] == duplicate.json()["status"] == "PENDING"
+    assert foreign.status_code == 404

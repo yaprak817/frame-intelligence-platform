@@ -4,6 +4,9 @@ __pycache__
 .pytest_cache
 tests
 run_video.py
+.test-tmp-issue42-head-fix/
+.tmp-issue42-phase4b-fix-tests/
+.tmp-issue42-phase4b-fix-tests-2/
 *.pyc
 *.mp4
 *.mov

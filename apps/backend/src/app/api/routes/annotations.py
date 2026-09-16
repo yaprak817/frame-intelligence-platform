@@ -24,6 +24,7 @@ from app.schemas.annotation_training import (
     AnnotationTrainingPage,
     AnnotationTrainingResponse,
     CreateAnnotationTrainingRequest,
+    LatestAnnotationModelResponse,
 )
 from app.schemas.annotations import (
     AnnotationClassMutationResponse,
@@ -35,10 +36,12 @@ from app.schemas.annotations import (
     UpdateAnnotationClassRequest,
 )
 from app.services.annotation_training import (
+    AnnotationTrainingAlreadyActive,
     AnnotationTrainingError,
     AnnotationTrainingIdempotencyConflict,
     AnnotationTrainingInsufficientImages,
     AnnotationTrainingInvalidDataset,
+    AnnotationTrainingInvalidState,
     AnnotationTrainingNotFound,
     AnnotationTrainingRevisionAlreadySnapshotted,
     AnnotationTrainingRevisionConflict,
@@ -163,6 +166,18 @@ def api_error(error: Exception) -> HTTPException:
 
 def training_api_error(error: Exception) -> HTTPException:
     mapping: list[tuple[type[Exception], int, str, str]] = [
+        (
+            AnnotationTrainingAlreadyActive,
+            409,
+            "ANNOTATION_TRAINING_ALREADY_ACTIVE",
+            "Another annotation training is active",
+        ),
+        (
+            AnnotationTrainingInvalidState,
+            409,
+            "ANNOTATION_TRAINING_INVALID_STATE",
+            "Annotation training cannot be started",
+        ),
         (
             AnnotationTrainingSnapshotLimitReached,
             409,
@@ -318,6 +333,72 @@ async def get_training(
         return await service.get(parsed_job_id, parsed_training_id)
     except Exception as error:
         raise training_api_error(error) from error
+
+
+@router.post(
+    "/trainings/{training_id}/start", response_model=AnnotationTrainingResponse
+)
+async def start_training(
+    job_id: str,
+    training_id: str,
+    response: Response,
+    service: TrainingService,
+    _authorization: Authorization,
+) -> AnnotationTrainingResponse:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    parsed_training_id = _canonical_path_uuid(training_id)
+    try:
+        item, started = await service.start(parsed_job_id, parsed_training_id)
+    except Exception as error:
+        raise training_api_error(error) from error
+    response.status_code = 202 if started else 200
+    response.headers["Cache-Control"] = "no-store"
+    return item
+
+
+@router.get("/models/latest", response_model=LatestAnnotationModelResponse)
+async def latest_model(
+    job_id: str, service: TrainingService, _authorization: Authorization
+) -> LatestAnnotationModelResponse:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    try:
+        item = await service.latest_model(parsed_job_id)
+    except Exception as error:
+        raise training_api_error(error) from error
+    assert item.model_version is not None
+    return LatestAnnotationModelResponse(
+        training_id=item.id,
+        model_version=item.model_version,
+        snapshot_version=item.snapshot_version,
+        created_at=item.completed_at or item.created_at,
+    )
+
+
+@router.get("/trainings/{training_id}/snapshot/download")
+async def download_training_snapshot(
+    job_id: str,
+    training_id: str,
+    service: TrainingService,
+    _authorization: Authorization,
+) -> StreamingResponse:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    parsed_training_id = _canonical_path_uuid(training_id)
+    try:
+        stream, filename = await service.snapshot_stream(
+            parsed_job_id, parsed_training_id
+        )
+    except Exception as error:
+        raise training_api_error(error) from error
+    return StreamingResponse(
+        stream.chunks(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(stream.metadata.size_bytes),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 async def project(service: AnnotationService, job_id: UUID):

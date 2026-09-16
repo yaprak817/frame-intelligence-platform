@@ -132,3 +132,12 @@ export interface AnnotationBox {
 export interface ImageAnnotations {
   project_revision: number; image_index: number; completed: boolean; boxes: AnnotationBox[];
 }
+export type AnnotationTrainingStatus = "SNAPSHOT_READY" | "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+export interface AnnotationTraining {
+  id: string; snapshot_version: number; source_revision: number; status: AnnotationTrainingStatus;
+  image_count: number; class_count: number; box_count: number; train_image_count: number;
+  validation_image_count: number; config: { max_snapshot_images: number; epochs: number; batch_size: number; image_size: 640 };
+  created_at: string; started_at: string | null; completed_at: string | null; failure_code: string | null;
+  progress_completed: number; progress_total: number; model_version: number | null;
+  status_url: string; snapshot_download_url: string | null;
+}

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.domain.jobs import JobStatus, SourceType
 from app.models.annotation_training import (
+    AnnotationTrainingOutbox,
     AnnotationTrainingRun,
     AnnotationTrainingSnapshotBox,
     AnnotationTrainingSnapshotClass,
@@ -217,6 +218,27 @@ async def exercise_snapshot_foundation() -> None:
         assert first[0].source_revision == 3
         assert first[0].train_image_count == 40
         assert first[0].validation_image_count == 10
+
+        async with sessions() as left, sessions() as right:
+            started = await asyncio.gather(
+                AnnotationTrainingService(left, results).start(job_id, first[0].id),
+                AnnotationTrainingService(right, results).start(job_id, first[0].id),
+            )
+        assert sum(dispatched for _response, dispatched in started) == 1
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    sa.select(sa.func.count()).select_from(AnnotationTrainingOutbox)
+                )
+                == 1
+            )
+            await session.execute(sa.delete(AnnotationTrainingOutbox))
+            await session.execute(
+                sa.update(AnnotationTrainingRun)
+                .where(AnnotationTrainingRun.id == first[0].id)
+                .values(status="SNAPSHOT_READY", progress_total=0)
+            )
+            await session.commit()
 
         request_200 = CreateAnnotationTrainingRequest.model_validate(
             {"expected_revision": 3, "config": {"max_snapshot_images": 200}}
