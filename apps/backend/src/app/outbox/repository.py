@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.jobs import JobStatus, OutboxEventType
+from app.models.annotation_training import AnnotationTrainingOutbox
 from app.models.frame_export import FrameExportOutbox
 from app.models.job_outbox import JobOutbox
 from app.models.processing_job import ProcessingJob
@@ -48,12 +49,55 @@ class OutboxRepository:
     ) -> int:
         processed = 0
         for _ in range(batch_size):
-            if not await self._publish_one(
-                publisher
-            ) and not await self._publish_one_export(publisher):
+            if (
+                not await self._publish_one(publisher)
+                and not await self._publish_one_export(publisher)
+                and not await self._publish_one_training(publisher)
+            ):
                 break
             processed += 1
         return processed
+
+    async def _publish_one_training(self, publisher: JobMessagePublisher) -> bool:
+        async with self._session_factory() as session, session.begin():
+            now = datetime.now(UTC)
+            event = await session.scalar(
+                select(AnnotationTrainingOutbox)
+                .where(
+                    AnnotationTrainingOutbox.published_at.is_(None),
+                    AnnotationTrainingOutbox.next_attempt_at <= now,
+                )
+                .order_by(AnnotationTrainingOutbox.created_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            if event is None:
+                return False
+            try:
+                if (
+                    event.event_type != "START_ANNOTATION_TRAINING"
+                    or not isinstance(event.payload, dict)
+                    or set(event.payload) != {"training_id"}
+                ):
+                    raise InvalidOutboxPayloadError("Invalid training payload")
+                training_id = UUID(str(event.payload["training_id"]))
+                if training_id != event.training_id:
+                    raise InvalidOutboxPayloadError("Training aggregate mismatch")
+                await asyncio.to_thread(publisher.publish_training, training_id)
+            except Exception as error:
+                event.attempt_count += 1
+                event.next_attempt_at = now + timedelta(
+                    seconds=self._backoff_seconds(event.attempt_count)
+                )
+                logger.warning(
+                    "Training outbox publish deferred event_id=%s error_type=%s",
+                    event.id,
+                    type(error).__name__,
+                )
+                return True
+            event.published_at = now
+            event.attempt_count += 1
+            return True
 
     async def _publish_one_export(self, publisher: JobMessagePublisher) -> bool:
         async with self._session_factory() as session, session.begin():

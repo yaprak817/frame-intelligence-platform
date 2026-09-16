@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -9,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.annotation_training import (
+    AnnotationTrainingOutbox,
     AnnotationTrainingRun,
     AnnotationTrainingSnapshotBox,
     AnnotationTrainingSnapshotClass,
@@ -29,6 +31,7 @@ from app.schemas.annotation_training import (
 )
 from app.schemas.artifacts import StoredDatasetManifestV1, StoredManifestV1
 from app.services.result_artifacts import ResultArtifactService
+from app.storage.s3 import ObjectStorageError, ObjectStream
 
 MIN_IMAGES = 50
 MAX_CLASSES = 20
@@ -79,6 +82,14 @@ class AnnotationTrainingRevisionAlreadySnapshotted(AnnotationTrainingError):
     code = "ANNOTATION_TRAINING_REVISION_ALREADY_SNAPSHOTTED"
 
 
+class AnnotationTrainingAlreadyActive(AnnotationTrainingError):
+    code = "ANNOTATION_TRAINING_ALREADY_ACTIVE"
+
+
+class AnnotationTrainingInvalidState(AnnotationTrainingError):
+    code = "ANNOTATION_TRAINING_INVALID_STATE"
+
+
 class AnnotationTrainingService:
     def __init__(
         self,
@@ -126,7 +137,7 @@ class AnnotationTrainingService:
         ).hexdigest()
         existing = await self._idempotent(project_id, idempotency_key, fingerprint)
         if existing is not None:
-            response = self.response(existing)
+            response = self.response(existing, job_id)
             await self.session.rollback()
             return response, False
         if project.revision != request.expected_revision:
@@ -249,6 +260,13 @@ class AnnotationTrainingService:
             model_artifact_reference=None,
             model_artifact_size_bytes=None,
             model_artifact_sha256=None,
+            progress_completed=0,
+            progress_total=0,
+            lease_token=None,
+            lease_expires_at=None,
+            attempt_generation=0,
+            working_prefix=None,
+            model_version=None,
         )
         yolo_by_class = {item.id: item.yolo_index for item in classes}
         try:
@@ -313,8 +331,8 @@ class AnnotationTrainingService:
                 fingerprint=fingerprint,
                 source_revision=request.expected_revision,
             )
-            return self.response(winner), False
-        return self.response(run), True
+            return self.response(winner, job_id), False
+        return self.response(run, job_id), True
 
     async def list_runs(
         self, job_id: UUID, *, limit: int, after_snapshot_version: int | None
@@ -339,7 +357,7 @@ class AnnotationTrainingService:
         has_more = len(rows) > limit
         page = rows[:limit]
         return AnnotationTrainingPage(
-            items=[self.response(item) for item in page],
+            items=[self.response(item, job_id) for item in page],
             next_cursor=page[-1].snapshot_version if has_more else None,
             has_more=has_more,
         )
@@ -354,7 +372,127 @@ class AnnotationTrainingService:
         )
         if item is None:
             raise AnnotationTrainingNotFound
-        return self.response(item)
+        return self.response(item, job_id)
+
+    async def start(
+        self, job_id: UUID, training_id: UUID
+    ) -> tuple[AnnotationTrainingResponse, bool]:
+        project = await self._current_project(job_id)
+        item = await self.session.scalar(
+            select(AnnotationTrainingRun)
+            .where(
+                AnnotationTrainingRun.id == training_id,
+                AnnotationTrainingRun.project_id == project.id,
+            )
+            .with_for_update()
+        )
+        if item is None:
+            await self.session.rollback()
+            raise AnnotationTrainingNotFound
+        if item.status in {
+            AnnotationTrainingStatus.PENDING,
+            AnnotationTrainingStatus.RUNNING,
+            AnnotationTrainingStatus.SUCCEEDED,
+        }:
+            response = self.response(item, job_id)
+            await self.session.rollback()
+            return response, False
+        if item.status != AnnotationTrainingStatus.SNAPSHOT_READY:
+            await self.session.rollback()
+            raise AnnotationTrainingInvalidState
+        active = await self.session.scalar(
+            select(AnnotationTrainingRun.id)
+            .where(
+                AnnotationTrainingRun.project_id == project.id,
+                AnnotationTrainingRun.id != item.id,
+                AnnotationTrainingRun.status.in_(
+                    (AnnotationTrainingStatus.PENDING, AnnotationTrainingStatus.RUNNING)
+                ),
+            )
+            .limit(1)
+        )
+        if active is not None:
+            await self.session.rollback()
+            raise AnnotationTrainingAlreadyActive
+        now = datetime.now(UTC)
+        item.status = AnnotationTrainingStatus.PENDING
+        item.completed_at = None
+        item.progress_completed = 0
+        item.progress_total = int(item.config.get("epochs", 10))
+        self.session.add(
+            AnnotationTrainingOutbox(
+                id=uuid4(),
+                training_id=item.id,
+                event_type="START_ANNOTATION_TRAINING",
+                payload={"training_id": str(item.id)},
+                created_at=now,
+                published_at=None,
+                attempt_count=0,
+                next_attempt_at=now,
+            )
+        )
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            await self.session.rollback()
+            current = await self.session.scalar(
+                select(AnnotationTrainingRun).where(
+                    AnnotationTrainingRun.id == item.id,
+                    AnnotationTrainingRun.project_id == project.id,
+                )
+            )
+            if current is not None and current.status in {
+                AnnotationTrainingStatus.PENDING,
+                AnnotationTrainingStatus.RUNNING,
+                AnnotationTrainingStatus.SUCCEEDED,
+            }:
+                return self.response(current, job_id), False
+            raise
+        return self.response(item, job_id), True
+
+    async def latest_model(self, job_id: UUID) -> AnnotationTrainingRun:
+        project = await self._current_project(job_id)
+        item = await self.session.scalar(
+            select(AnnotationTrainingRun)
+            .where(
+                AnnotationTrainingRun.project_id == project.id,
+                AnnotationTrainingRun.status == AnnotationTrainingStatus.SUCCEEDED,
+            )
+            .order_by(AnnotationTrainingRun.model_version.desc())
+            .limit(1)
+        )
+        if item is None:
+            raise AnnotationTrainingNotFound
+        return item
+
+    async def snapshot_stream(
+        self, job_id: UUID, training_id: UUID
+    ) -> tuple[ObjectStream, str]:
+        project = await self._current_project(job_id)
+        item = await self.session.scalar(
+            select(AnnotationTrainingRun).where(
+                AnnotationTrainingRun.id == training_id,
+                AnnotationTrainingRun.project_id == project.id,
+                AnnotationTrainingRun.status == AnnotationTrainingStatus.SUCCEEDED,
+            )
+        )
+        if item is None or item.snapshot_artifact_reference is None:
+            raise AnnotationTrainingNotFound
+        expected_key = f"annotations/{project.id}/trainings/{item.id}/snapshot.zip"
+        expected_reference = f"s3://{self.results._storage.bucket}/{expected_key}"
+        if not hmac.compare_digest(
+            item.snapshot_artifact_reference, expected_reference
+        ):
+            raise ObjectStorageError("Invalid training artifact reference")
+        stream = await self.results._storage.open_stream(expected_key)
+        if (
+            stream.metadata.size_bytes != item.snapshot_artifact_size_bytes
+            or stream.metadata.content_type != "application/zip"
+            or stream.metadata.sha256 != item.snapshot_artifact_sha256
+        ):
+            await asyncio.to_thread(stream.body.close)
+            raise ObjectStorageError("Invalid training artifact metadata")
+        return stream, f"annotation-snapshot-v{item.snapshot_version}.zip"
 
     async def _current_project(self, job_id: UUID) -> AnnotationProject:
         _job, manifest = await self.results.annotation_source(job_id)
@@ -503,7 +641,9 @@ class AnnotationTrainingService:
         }
 
     @staticmethod
-    def response(item: AnnotationTrainingRun) -> AnnotationTrainingResponse:
+    def response(
+        item: AnnotationTrainingRun, job_id: UUID
+    ) -> AnnotationTrainingResponse:
         return AnnotationTrainingResponse(
             id=item.id,
             snapshot_version=item.snapshot_version,
@@ -519,4 +659,13 @@ class AnnotationTrainingService:
             started_at=item.started_at,
             completed_at=item.completed_at,
             failure_code=item.failure_code,
+            progress_completed=item.progress_completed,
+            progress_total=item.progress_total,
+            model_version=item.model_version,
+            status_url=f"/api/v1/jobs/{job_id}/annotations/trainings/{item.id}",
+            snapshot_download_url=(
+                f"/api/v1/jobs/{job_id}/annotations/trainings/{item.id}/snapshot/download"
+                if item.status == AnnotationTrainingStatus.SUCCEEDED
+                else None
+            ),
         )

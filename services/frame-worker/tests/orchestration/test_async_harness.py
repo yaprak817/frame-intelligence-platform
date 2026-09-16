@@ -539,7 +539,7 @@ def test_failure_diagnostic_does_not_change_pytest_exit_code(
 
 
 def test_harness_requires_current_single_migration_head() -> None:
-    assert harness.TARGET_REVISION == "20260914_0007"
+    assert harness.TARGET_REVISION == "20260914_0008"
     assert harness.DEPENDENCY_PREP_TIMEOUT_SECONDS == 300
     assert harness.MIGRATION_TIMEOUT_SECONDS == 120
 

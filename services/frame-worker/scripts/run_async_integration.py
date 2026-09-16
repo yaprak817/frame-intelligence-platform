@@ -27,7 +27,7 @@ import psycopg
 import redis
 from botocore.exceptions import ClientError
 
-TARGET_REVISION = "20260914_0007"
+TARGET_REVISION = "20260914_0008"
 STORAGE_CLEANUP_MAX_OBJECTS = 10_000
 STORAGE_CLEANUP_MAX_ATTEMPTS = 5
 DEPENDENCY_PREP_TIMEOUT_SECONDS = 300
@@ -929,6 +929,16 @@ def main(
             raise RuntimeError("Managed service exited before test completion")
         if re.search(r"\bskipped\b", bounded_output.decode(errors="replace")):
             raise RuntimeError("Integration run contained skipped tests")
+        phase = "REAL_ML_TRAINING"
+        training = subprocess.run(
+            [sys.executable, "scripts/run_real_training_integration.py"],
+            cwd=worker,
+            env=env,
+            capture_output=True,
+            timeout=1200,
+        )
+        if training.returncode != 0 or b"REAL_TRAINING_PASS" not in training.stdout:
+            raise RuntimeError("Real ML training integration failed")
         test_exit_code = 0
     except KeyboardInterrupt:
         test_exit_code = 1

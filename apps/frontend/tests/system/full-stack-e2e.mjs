@@ -14,16 +14,19 @@ const SKIP_BUILD = process.env.FULL_STACK_E2E_SKIP_BUILD === "1";
 const COMPOSE_FILES = PRODUCTION_E2E
   ? ["-f", join(REPOSITORY_ROOT, "compose.production.yaml"), "-f", join(SCRIPT_DIR, "compose.production-e2e.yaml")]
   : ["-f", join(REPOSITORY_ROOT, "compose.yaml"), "-f", join(SCRIPT_DIR, "compose.e2e.yaml")];
-const RUN_TIMEOUT_MS = 15 * 60_000;
+// Readiness, job processing, and training have independent sequential limits.
+// The outer cleanup timer must leave enough room for those checks to finish.
+const RUN_TIMEOUT_MS = 30 * 60_000;
 const READY_TIMEOUT_MS = 10 * 60_000;
 const JOB_TIMEOUT_MS = 4 * 60_000;
-const SAFE_PROJECT = /^framee2e_[a-z0-9][a-z0-9_-]{5,48}$/;
+const TRAINING_TIMEOUT_MS = 12 * 60_000;
+const SAFE_PROJECT = /^(?:framee2e_|issue42-phase4b-)[a-z0-9][a-z0-9_-]{5,48}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TERMINAL = new Set(["SUCCEEDED", "FAILED"]);
 
 function projectName() {
   const supplied = process.env.FULL_STACK_E2E_PROJECT;
-  const generated = `framee2e_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  const generated = `issue42-phase4b-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const value = (supplied || generated).toLowerCase();
   if (!SAFE_PROJECT.test(value)) throw new Error("FULL_STACK_E2E_PROJECT güvenli biçimde değil.");
   return value;
@@ -36,7 +39,7 @@ function safeText(value) {
     .replace(/\b[a-z]:\\[^\r\n"'<>|]+/gi, "[REDACTED]")
     .replace(/\bs3:\/\/[^\s"'<>]+/gi, "[REDACTED]")
     .replace(/\be2e-[a-z0-9-]+(?:\/[^\s"'<>]+)?/gi, "[REDACTED]")
-    .replace(/\/(?:tmp|var\/tmp)\/frame-full-stack-e2e-[^\s"'<>]*/gi, "[REDACTED]")
+    .replace(/\/(?:tmp|var\/tmp)\/(?:frame-full-stack-e2e|issue42-phase4b-e2e)-[^\s"'<>]*/gi, "[REDACTED]")
     .replace(/(["']?(?:bucket(?:_name)?|object(?:_key|_name|_path)?|storage_prefix)["']?\s*[:=]\s*)["']?[^\s,"'}\]]+["']?/gi, "$1[REDACTED]")
     .replace(/(?:postgres|redis|minio|backend|outbox-publisher|frame-worker):\d+/gi, "[REDACTED]")
     .replace(/https?:\/\/(?:127\.0\.0\.1|10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})(?::\d+)?/gi, "[REDACTED]")
@@ -436,7 +439,72 @@ async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeig
   }
 }
 
-async function browserFlow(baseUrl, videoPath) {
+async function trainingFlow(baseUrl, jobId, onRunning) {
+  const json = async (path, init = {}) => {
+    for (let attempt = 0; attempt <= 10; attempt += 1) {
+      const response = await fetch(`${baseUrl}${path}`, init);
+      const body = await response.json();
+      if (response.ok) return body;
+      if (response.status !== 429 || attempt === 10) throw new Error(`Training API ${response.status}.`);
+      const seconds = Number(response.headers.get("retry-after"));
+      const delay = Math.min(60, Math.max(1, Number.isSafeInteger(seconds) ? seconds : 1));
+      await new Promise((resolveWait) => setTimeout(resolveWait, delay * 1000));
+    }
+    throw new Error("Training API retry budget exhausted.");
+  };
+  const project = await json(`/api/v1/jobs/${jobId}/annotations?page=1&page_size=100`, { method: "POST" });
+  if (project.total_images !== 50 || project.images.length !== 50) throw new Error("Training snapshot image count invalid.");
+  const createdClass = await json(`/api/v1/jobs/${jobId}/annotations/classes`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ expected_revision: project.revision, name: "vehicle", color: "#3366FF" }),
+  });
+  const classId = createdClass.annotation_class.id;
+  let revision = createdClass.revision;
+  for (const [position, image] of project.images.entries()) {
+    const saved = await json(`/api/v1/jobs/${jobId}/annotations/images/${image.index}`, {
+      method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_revision: revision, completed: true, boxes: position === 49 ? [] : [{ id: globalThis.crypto.randomUUID(), class_id: classId, x_center: .5, y_center: .5, width: .5, height: .5 }] }),
+    });
+    revision = saved.project_revision;
+  }
+  const created = await json(`/api/v1/jobs/${jobId}/annotations/trainings`, {
+    method: "POST", headers: { "content-type": "application/json", "idempotency-key": `e2e-training-${jobId}` },
+    body: JSON.stringify({ expected_revision: revision, config: { epochs: 1 } }),
+  });
+  if (created.status !== "SNAPSHOT_READY" || created.image_count !== 50 || created.validation_image_count < 1 || created.box_count !== 49 || created.config?.epochs !== 1) throw new Error("Training snapshot contract invalid.");
+  const started = await json(`${created.status_url}/start`, { method: "POST" });
+  if (started.status !== "PENDING") throw new Error("Training did not enter PENDING.");
+  const duplicateStart = await json(`${created.status_url}/start`, { method: "POST" });
+  if (duplicateStart.id !== created.id || !["PENDING", "RUNNING", "SUCCEEDED"].includes(duplicateStart.status)) throw new Error("Duplicate training start was not a no-op.");
+  const statuses = ["SNAPSHOT_READY", "PENDING"];
+  let previousProgress = 0;
+  let terminal;
+  let runningProbeStarted = false;
+  const deadline = Date.now() + TRAINING_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const current = await json(created.status_url);
+    if (current.progress_completed < previousProgress || current.progress_completed > current.progress_total) throw new Error("Training progress is not bounded and monotonic.");
+    previousProgress = current.progress_completed;
+    if (!statuses.includes(current.status)) statuses.push(current.status);
+    if (current.status === "RUNNING" && !runningProbeStarted && onRunning) {
+      runningProbeStarted = true;
+      await onRunning(created.status_url);
+    }
+    if (TERMINAL.has(current.status)) { terminal = current; break; }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
+  }
+  if (terminal?.status !== "SUCCEEDED" || terminal.model_version !== 1 || terminal.progress_completed !== terminal.progress_total || !statuses.includes("RUNNING")) throw new Error(`Training terminal=${terminal?.status ?? "timeout"}.`);
+  const latest = await json(`/api/v1/jobs/${jobId}/annotations/models/latest`);
+  if (latest.training_id !== created.id || latest.model_version !== terminal.model_version) throw new Error("Latest model read-back is unstable.");
+  const snapshot = await fetch(`${baseUrl}${terminal.snapshot_download_url}`);
+  const snapshotBytes = new Uint8Array(await snapshot.arrayBuffer());
+  if (!snapshot.ok || snapshotBytes.length < 1 || snapshot.headers.get("content-type") !== "application/zip") throw new Error("Snapshot download failed.");
+  const refreshed = await json(created.status_url);
+  if (refreshed.status !== "SUCCEEDED" || refreshed.model_version !== terminal.model_version) throw new Error("Training refresh persistence failed.");
+  return { statuses: statuses.join(" -> "), revision, modelVersion: terminal.model_version, snapshotBytes: snapshotBytes.length };
+}
+
+async function browserFlow(baseUrl, videoPath, onVideoSucceeded) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ acceptDownloads: true });
   const page = await context.newPage();
@@ -500,6 +568,7 @@ async function browserFlow(baseUrl, videoPath) {
       await page.waitForTimeout(250);
     }
     if (terminal !== "SUCCEEDED") throw new Error(`Job başarıyla tamamlanmadı (terminal=${terminal ?? "timeout"}).`);
+    if (onVideoSucceeded) await onVideoSucceeded();
     if (statuses[0] !== "PENDING_DISPATCH" || !statuses.some((status) => status === "QUEUED" || status === "RUNNING")) {
       throw new Error(`Gerçek durum geçişleri eksik: ${statuses.join(" -> ")}`);
     }
@@ -675,7 +744,7 @@ async function main() {
   if (mode !== "run") throw new Error(`Bilinmeyen mod: ${mode}`);
 
   const baseline = await baselineContainers();
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), "frame-full-stack-e2e-"));
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "issue42-phase4b-e2e-"));
   const videoPath = join(temporaryDirectory, "fixture.mp4");
   const imagePaths = ["fixture.jpg", "fixture.png", "fixture.webp"].map((name) => join(temporaryDirectory, name));
   const archivePath = join(temporaryDirectory, "fixture-images.zip");
@@ -698,8 +767,8 @@ async function main() {
     upArguments.push("--wait", "--wait-timeout", String(Math.ceil(READY_TIMEOUT_MS / 1000)));
     await docker(project, env, upArguments, { timeoutMs: READY_TIMEOUT_MS });
     const expectedServices = PRODUCTION_E2E
-      ? ["proxy", "frontend", "migrate", "backend", "outbox-publisher", "frame-worker", "postgres", "redis", "minio", "minio-init"]
-      : ["frontend", "backend", "outbox-publisher", "frame-worker", "postgres", "redis", "minio", "minio-init"];
+      ? ["proxy", "frontend", "migrate", "backend", "outbox-publisher", "frame-worker", "ml-worker", "postgres", "redis", "minio", "minio-init"]
+      : ["frontend", "backend", "outbox-publisher", "frame-worker", "ml-worker", "postgres", "redis", "minio", "minio-init"];
     for (const service of expectedServices) {
       const container = await docker(project, env, ["ps", "-a", "-q", service], { timeoutMs: 30_000 });
       if (!/^[0-9a-f]{12,64}$/.test(container.stdout)) throw new Error(`Beklenen production servisi bulunamadı: ${service}`);
@@ -728,10 +797,24 @@ async function main() {
     await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, datasetSingle.jobId, 640, 640);
     const datasetMultiple = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, imagePaths, false, temporaryDirectory);
     const datasetZip = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [archivePath], true, temporaryDirectory);
+    const trainingArchivePath = join(temporaryDirectory, "training-images.zip");
+    await run("python", ["-c", "import sys,zipfile;data=open(sys.argv[2],'rb').read();z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED);[z.writestr(f'train/image_{i:06d}.jpg',data) for i in range(50)];z.close()", trainingArchivePath, imagePaths[0]], { timeoutMs: 30_000 });
+    const trainingDataset = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [trainingArchivePath], true, temporaryDirectory);
+    let concurrentVideo;
+    const training = await trainingFlow(`http://${publicHost}:${frontendPort}`, trainingDataset.jobId, async (statusUrl) => {
+      concurrentVideo = await browserFlow(`http://${publicHost}:${frontendPort}`, videoPath, async () => {
+        const response = await fetch(`http://${publicHost}:${frontendPort}${statusUrl}`);
+        const body = await response.json();
+        const trainingStatus = response.ok && ["PENDING", "RUNNING", "SUCCEEDED", "FAILED"].includes(body.status) ? body.status : "UNKNOWN";
+        if (trainingStatus !== "RUNNING") throw new Error(`Video=SUCCEEDED observed with training=${trainingStatus}; expected RUNNING.`);
+      });
+      if (!concurrentVideo || concurrentVideo.framesSaved !== 4) throw new Error("Video job did not succeed during ML training.");
+    });
+    if (!concurrentVideo || concurrentVideo.framesSaved !== 4) throw new Error("Video job did not progress while ML training was RUNNING.");
     if (PRODUCTION_E2E) {
       const postgresBefore = (await docker(project, env, ["ps", "-q", "postgres"], { timeoutMs: 30_000 })).stdout;
       const minioBefore = (await docker(project, env, ["ps", "-q", "minio"], { timeoutMs: 30_000 })).stdout;
-      const restartServices = ["redis", "backend", "outbox-publisher", "frame-worker", "frontend", "proxy"];
+      const restartServices = ["redis", "backend", "outbox-publisher", "frame-worker", "ml-worker", "frontend", "proxy"];
       await docker(project, env, ["stop", "--timeout", "10", ...restartServices], { timeoutMs: 120_000 });
       await docker(project, env, ["up", "-d", "--force-recreate", "--no-deps", "postgres", "minio"], { timeoutMs: 120_000 });
       await waitForService(project, env, "postgres");
@@ -741,9 +824,10 @@ async function main() {
       await waitForService(project, env, "redis");
       await docker(project, env, ["start", "backend"], { timeoutMs: 30_000 });
       await waitForService(project, env, "backend");
-      await docker(project, env, ["start", "outbox-publisher", "frame-worker", "frontend"], { timeoutMs: 60_000 });
+      await docker(project, env, ["start", "outbox-publisher", "frame-worker", "ml-worker", "frontend"], { timeoutMs: 60_000 });
       await waitForService(project, env, "outbox-publisher", "running");
       await waitForService(project, env, "frame-worker", "running");
+      await waitForService(project, env, "ml-worker");
       await waitForService(project, env, "frontend");
       await docker(project, env, ["start", "proxy"], { timeoutMs: 30_000 });
       await waitForService(project, env, "proxy");
@@ -768,6 +852,11 @@ async function main() {
       if (!manifestResponse.ok || !manifestIsPublic(manifest, result.jobId)) {
         throw new Error("Restart sonrası kalıcı manifest doğrulanamadı.");
       }
+    }
+    if (PRODUCTION_E2E) {
+      const persistedTraining = await fetch(`http://${publicHost}:${frontendPort}/api/v1/jobs/${trainingDataset.jobId}/annotations/models/latest`);
+      const persistedTrainingBody = await persistedTraining.json();
+      if (!persistedTraining.ok || persistedTrainingBody?.model_version !== training.modelVersion) throw new Error("Training/model persistence restart verification failed.");
     }
     const persistedAnnotation = await docker(project, env, ["exec", "-T", "postgres", "psql", "-U", env.POSTGRES_USER, "-d", env.POSTGRES_DB, "-At", "-c", `SELECT i.completed::text || '|' || count(b.id)::text || '|' || min(b.x_center)::text || '|' || min(b.y_center)::text || '|' || min(b.width)::text || '|' || min(b.height)::text FROM annotation_images i JOIN annotation_projects p ON p.id=i.project_id LEFT JOIN annotation_boxes b ON b.project_id=i.project_id AND b.image_index=i.image_index WHERE p.job_id='${result.jobId}' AND i.image_index=0 GROUP BY i.completed;`], { timeoutMs: 30_000 });
     const persistedParts = persistedAnnotation.stdout.split("|");

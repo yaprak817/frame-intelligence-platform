@@ -13,6 +13,7 @@ import type {
   AnnotationClass,
   ImageAnnotations,
   AnnotationBox,
+  AnnotationTraining,
 } from "./types";
 
 const STATUSES: JobStatus[] = [
@@ -320,4 +321,37 @@ export async function deleteAnnotationClass(jobId: string, classId: string, expe
   const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/classes/${encodeURIComponent(classId)}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: expectedRevision }), signal });
   if (!isRecord(value) || !exactKeys(value, ["revision", "annotation_class"]) || !isSafeInteger(value.revision) || value.annotation_class !== null) throw new ApiError(502, "MANIFEST_INVALID");
   return value.revision as number;
+}
+
+function isTraining(value: unknown, jobId: string): value is AnnotationTraining {
+  if (!isRecord(value) || !exactKeys(value, ["id", "snapshot_version", "source_revision", "status", "image_count", "class_count", "box_count", "train_image_count", "validation_image_count", "config", "created_at", "started_at", "completed_at", "failure_code", "progress_completed", "progress_total", "model_version", "status_url", "snapshot_download_url"])) return false;
+  if (typeof value.id !== "string" || canonicalUuid(value.id) === null || !["SNAPSHOT_READY", "PENDING", "RUNNING", "SUCCEEDED", "FAILED"].includes(String(value.status))) return false;
+  const integers = [value.snapshot_version, value.source_revision, value.image_count, value.class_count, value.box_count, value.train_image_count, value.validation_image_count, value.progress_completed, value.progress_total];
+  if (!integers.every((item) => isSafeInteger(item)) || Number(value.progress_completed) > Number(value.progress_total)) return false;
+  if (!isRecord(value.config) || !exactKeys(value.config, ["max_snapshot_images", "epochs", "batch_size", "image_size"]) || !isSafeInteger(value.config.epochs, 1) || Number(value.config.epochs) > 25 || !isSafeInteger(value.config.batch_size, 1) || Number(value.config.batch_size) > 4 || value.config.image_size !== 640) return false;
+  const prefix = `/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/trainings/${value.id}`;
+  const nullableTrainingDate = (candidate: unknown) => candidate === null || isUtcDate(candidate);
+  return isUtcDate(value.created_at) && nullableTrainingDate(value.started_at) && nullableTrainingDate(value.completed_at) && (value.failure_code === null || typeof value.failure_code === "string") && (value.model_version === null || isSafeInteger(value.model_version, 1)) && value.status_url === prefix && (value.snapshot_download_url === null || value.snapshot_download_url === `${prefix}/snapshot/download`);
+}
+
+export async function listAnnotationTrainings(jobId: string, signal?: AbortSignal): Promise<AnnotationTraining[]> {
+  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/trainings?limit=20`, { signal });
+  if (!isRecord(value) || !exactKeys(value, ["items", "next_cursor", "has_more"]) || !Array.isArray(value.items) || value.has_more !== false || !value.items.every((item) => isTraining(item, jobId))) throw new ApiError(502, "MANIFEST_INVALID");
+  return value.items as AnnotationTraining[];
+}
+
+export async function createAndStartAnnotationTraining(jobId: string, revision: number, idempotencyKey: string, signal?: AbortSignal): Promise<AnnotationTraining> {
+  const created = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/trainings`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ expected_revision: revision }), signal });
+  if (!isTraining(created, jobId)) throw new ApiError(502, "MANIFEST_INVALID");
+  const started = await annotationRequest(`${created.status_url}/start`, { method: "POST", signal });
+  if (!isTraining(started, jobId) || started.id !== created.id) throw new ApiError(502, "MANIFEST_INVALID");
+  return started;
+}
+
+export async function getAnnotationTraining(jobId: string, statusUrl: string, signal?: AbortSignal): Promise<AnnotationTraining> {
+  const prefix = `/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/trainings/`;
+  if (!statusUrl.startsWith(prefix) || statusUrl.includes("\\") || statusUrl.includes("?") || statusUrl.includes("#")) throw new ApiError(502, "MANIFEST_INVALID");
+  const value = await annotationRequest(statusUrl, { signal });
+  if (!isTraining(value, jobId) || value.status_url !== statusUrl) throw new ApiError(502, "MANIFEST_INVALID");
+  return value;
 }

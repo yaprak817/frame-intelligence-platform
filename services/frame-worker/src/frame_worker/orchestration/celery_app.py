@@ -29,5 +29,6 @@ celery_app.conf.update(
         "frame_worker.process_video": {"queue": settings.task_queue},
         "frame_worker.process_image_dataset": {"queue": settings.task_queue},
         "frame_worker.create_frame_export": {"queue": settings.task_queue},
+        "frame_worker.train_annotation_model": {"queue": "annotation-ml"},
     },
 )

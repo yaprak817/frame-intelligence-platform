@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -30,7 +31,7 @@ ALEMBIC_CONFIG = BACKEND_ROOT / "alembic.ini"
 def test_annotation_migration_is_the_single_head(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
-    assert script.get_heads() == ["20260914_0007"]
+    assert script.get_heads() == ["20260914_0008"]
 
 
 async def inspect_schema() -> None:
@@ -171,33 +172,27 @@ async def seed_annotation_project() -> tuple:
             )
             await session.flush()
             training_id, class_id, box_id = uuid4(), uuid4(), uuid4()
-            session.add(
-                AnnotationTrainingRun(
-                    id=training_id,
-                    project_id=project_id,
-                    snapshot_version=1,
-                    source_revision=0,
-                    status="SNAPSHOT_READY",
-                    selected_image_count=50,
-                    selected_class_count=1,
-                    selected_box_count=1,
-                    train_image_count=40,
-                    validation_image_count=10,
-                    config={"max_snapshot_images": 50},
-                    config_hash="a" * 64,
-                    idempotency_key="migration-training-key",
-                    request_fingerprint="b" * 64,
-                    created_at=now,
-                    started_at=None,
-                    completed_at=now,
-                    failure_code=None,
-                    snapshot_artifact_reference=None,
-                    snapshot_artifact_size_bytes=None,
-                    snapshot_artifact_sha256=None,
-                    model_artifact_reference=None,
-                    model_artifact_size_bytes=None,
-                    model_artifact_sha256=None,
-                )
+            await session.execute(
+                sa.text(
+                    "INSERT INTO annotation_training_runs "
+                    "(id, project_id, snapshot_version, source_revision, status, "
+                    "selected_image_count, selected_class_count, selected_box_count, "
+                    "train_image_count, validation_image_count, config, config_hash, "
+                    "idempotency_key, request_fingerprint, created_at, completed_at) "
+                    "VALUES (:id, :project_id, 1, 0, 'SNAPSHOT_READY', 50, 1, 1, "
+                    "40, 10, CAST(:config AS json), :config_hash, :idempotency_key, "
+                    ":request_fingerprint, :created_at, :completed_at)"
+                ),
+                {
+                    "id": training_id,
+                    "project_id": project_id,
+                    "config": json.dumps({"max_snapshot_images": 50}),
+                    "config_hash": "a" * 64,
+                    "idempotency_key": "migration-training-key",
+                    "request_fingerprint": "b" * 64,
+                    "created_at": now,
+                    "completed_at": now,
+                },
             )
             await session.flush()
             session.add(
@@ -308,7 +303,7 @@ async def remove_annotation_project(job_id, project_id) -> dict[str, int]:
 )
 def test_real_postgres_migration_downgrade_refuses_with_data() -> None:
     run_alembic("upgrade", "head")
-    assert "20260914_0007" in run_alembic("current").stdout
+    assert "20260914_0008" in run_alembic("current").stdout
     if sys.platform == "win32":
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             job_id, project_id, training_id = runner.run(seed_annotation_project())
@@ -320,7 +315,7 @@ def test_real_postgres_migration_downgrade_refuses_with_data() -> None:
     assert "Downgrade refused while annotation training snapshots exist" in (
         refused.stdout + refused.stderr
     )
-    assert "20260914_0007" in run_alembic("current").stdout
+    assert "20260914_0008" in run_alembic("current").stdout
 
     async def assert_seed_preserved() -> None:
         engine = create_async_engine(os.environ["TEST_DATABASE_URL"])

@@ -83,6 +83,52 @@ class AnnotationTrainingRun(Base):
             "config_hash ~ '^[0-9a-f]{64}$'",
             name="ck_annotation_training_runs_config_hash",
         ),
+        CheckConstraint(
+            "progress_total >= 0 AND progress_completed >= 0 "
+            "AND progress_completed <= progress_total",
+            name="ck_annotation_training_runs_progress",
+        ),
+        CheckConstraint(
+            "attempt_generation >= 0", name="ck_annotation_training_runs_attempt"
+        ),
+        CheckConstraint(
+            "(status = 'FAILED') = (failure_code IS NOT NULL)",
+            name="ck_annotation_training_runs_failure",
+        ),
+        CheckConstraint(
+            "snapshot_artifact_size_bytes IS NULL OR "
+            "snapshot_artifact_size_bytes BETWEEN 1 AND 1073741824",
+            name="ck_annotation_training_runs_snapshot_size",
+        ),
+        CheckConstraint(
+            "model_artifact_size_bytes IS NULL OR "
+            "model_artifact_size_bytes BETWEEN 1 AND 268435456",
+            name="ck_annotation_training_runs_model_size",
+        ),
+        CheckConstraint(
+            "snapshot_artifact_sha256 IS NULL OR "
+            "snapshot_artifact_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_annotation_training_runs_snapshot_sha",
+        ),
+        CheckConstraint(
+            "model_artifact_sha256 IS NULL OR model_artifact_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_annotation_training_runs_model_sha",
+        ),
+        CheckConstraint(
+            "status <> 'SUCCEEDED' OR (model_version IS NOT NULL AND "
+            "model_artifact_reference IS NOT NULL AND "
+            "model_artifact_size_bytes IS NOT NULL AND "
+            "model_artifact_sha256 IS NOT NULL AND "
+            "snapshot_artifact_reference IS NOT NULL AND "
+            "snapshot_artifact_size_bytes IS NOT NULL AND "
+            "snapshot_artifact_sha256 IS NOT NULL)",
+            name="ck_annotation_training_runs_success",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "model_version",
+            name="uq_annotation_training_runs_model_version",
+        ),
         Index(
             "ix_annotation_training_runs_project_created", "project_id", "created_at"
         ),
@@ -122,6 +168,49 @@ class AnnotationTrainingRun(Base):
     model_artifact_reference: Mapped[str | None] = mapped_column(Text)
     model_artifact_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     model_artifact_sha256: Mapped[str | None] = mapped_column(String(64))
+    progress_completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    working_prefix: Mapped[str | None] = mapped_column(Text)
+    model_version: Mapped[int | None] = mapped_column(Integer)
+
+
+class AnnotationTrainingOutbox(Base):
+    __tablename__ = "annotation_training_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "training_id", "event_type", name="uq_annotation_training_outbox_event"
+        ),
+        CheckConstraint(
+            "event_type = 'START_ANNOTATION_TRAINING'",
+            name="ck_annotation_training_outbox_event",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0", name="ck_annotation_training_outbox_attempt"
+        ),
+        Index(
+            "ix_annotation_training_outbox_ready",
+            "next_attempt_at",
+            "created_at",
+            postgresql_where=text("published_at IS NULL"),
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    training_id: Mapped[UUID] = mapped_column(
+        ForeignKey("annotation_training_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
 
 
 class AnnotationTrainingSnapshotClass(Base):
