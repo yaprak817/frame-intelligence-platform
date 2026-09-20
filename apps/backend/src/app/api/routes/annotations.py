@@ -16,10 +16,12 @@ from starlette.responses import StreamingResponse
 
 from app.api.dependencies import (
     authorize_result_access,
+    get_annotation_inference_service,
     get_annotation_service,
     get_annotation_training_service,
 )
 from app.api.routes.jobs import _idempotency_key
+from app.schemas.annotation_inference import AnnotationInferenceResponse
 from app.schemas.annotation_training import (
     AnnotationTrainingPage,
     AnnotationTrainingResponse,
@@ -34,6 +36,17 @@ from app.schemas.annotations import (
     PutImageAnnotationsRequest,
     RevisionRequest,
     UpdateAnnotationClassRequest,
+)
+from app.services.annotation_inference import (
+    AnnotationInferenceDispatchFailed,
+    AnnotationInferenceError,
+    AnnotationInferenceLimitExceeded,
+    AnnotationInferenceModelClassesStale,
+    AnnotationInferenceModelNotFound,
+    AnnotationInferenceNoTargets,
+    AnnotationInferenceNotFound,
+    AnnotationInferenceService,
+    AnnotationInferenceSourceChanged,
 )
 from app.services.annotation_training import (
     AnnotationTrainingAlreadyActive,
@@ -71,6 +84,9 @@ from app.storage.s3 import ObjectStorageError
 
 router = APIRouter(prefix="/jobs/{job_id}/annotations")
 Service = Annotated[AnnotationService, Depends(get_annotation_service)]
+InferenceService = Annotated[
+    AnnotationInferenceService, Depends(get_annotation_inference_service)
+]
 TrainingService = Annotated[
     AnnotationTrainingService, Depends(get_annotation_training_service)
 ]
@@ -160,6 +176,71 @@ def api_error(error: Exception) -> HTTPException:
         detail={
             "code": "ANNOTATION_STORAGE_UNAVAILABLE",
             "message": "Annotation service is unavailable",
+        },
+    )
+
+
+def inference_api_error(error: Exception) -> HTTPException:
+    mapping: list[tuple[type[Exception], int, str, str]] = [
+        (
+            AnnotationInferenceNotFound,
+            404,
+            "ANNOTATION_INFERENCE_NOT_FOUND",
+            "Automatic labeling run was not found",
+        ),
+        (
+            AnnotationInferenceModelNotFound,
+            409,
+            "ANNOTATION_INFERENCE_MODEL_NOT_FOUND",
+            "Train a model before automatic labeling",
+        ),
+        (
+            AnnotationInferenceNoTargets,
+            409,
+            "ANNOTATION_INFERENCE_NO_TARGETS",
+            "There are no unlabeled images to process",
+        ),
+        (
+            AnnotationInferenceLimitExceeded,
+            409,
+            "ANNOTATION_INFERENCE_LIMIT_EXCEEDED",
+            "Too many images for one automatic labeling run",
+        ),
+        (
+            AnnotationInferenceModelClassesStale,
+            409,
+            "ANNOTATION_INFERENCE_MODEL_CLASSES_STALE",
+            "The trained model no longer matches the annotation classes",
+        ),
+        (
+            AnnotationInferenceSourceChanged,
+            409,
+            "ANNOTATION_SOURCE_CHANGED",
+            "Annotation source has changed",
+        ),
+        (
+            AnnotationInferenceDispatchFailed,
+            503,
+            "ANNOTATION_INFERENCE_DISPATCH_FAILED",
+            "Automatic labeling could not be queued",
+        ),
+    ]
+    for kind, code, public_code, message in mapping:
+        if isinstance(error, kind):
+            return HTTPException(code, detail={"code": public_code, "message": message})
+    if isinstance(error, AnnotationInferenceError):
+        return HTTPException(
+            422,
+            detail={
+                "code": error.code,
+                "message": "Automatic labeling is not available",
+            },
+        )
+    return HTTPException(
+        503,
+        detail={
+            "code": "ANNOTATION_INFERENCE_UNAVAILABLE",
+            "message": "Automatic labeling service is unavailable",
         },
     )
 
@@ -268,6 +349,61 @@ def _bounded_query_integer(
     if not minimum <= value <= maximum:
         raise HTTPException(422, detail="Invalid pagination value")
     return value
+
+
+@router.post(
+    "/auto-label",
+    response_model=AnnotationInferenceResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_auto_label(
+    job_id: str,
+    response: Response,
+    service: InferenceService,
+    _authorization: Authorization,
+) -> AnnotationInferenceResponse:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    try:
+        item, created = await service.start(parsed_job_id)
+    except Exception as error:
+        raise inference_api_error(error) from error
+    response.status_code = 202 if created else 200
+    response.headers["Cache-Control"] = "no-store"
+    return item
+
+
+@router.get(
+    "/auto-label/latest",
+    response_model=AnnotationInferenceResponse,
+)
+async def latest_auto_label(
+    job_id: str,
+    service: InferenceService,
+    _authorization: Authorization,
+) -> AnnotationInferenceResponse:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    try:
+        return await service.latest(parsed_job_id)
+    except Exception as error:
+        raise inference_api_error(error) from error
+
+
+@router.get(
+    "/auto-label/{inference_id}",
+    response_model=AnnotationInferenceResponse,
+)
+async def get_auto_label(
+    job_id: str,
+    inference_id: str,
+    service: InferenceService,
+    _authorization: Authorization,
+) -> AnnotationInferenceResponse:
+    parsed_job_id = _canonical_path_uuid(job_id)
+    parsed_inference_id = _canonical_path_uuid(inference_id)
+    try:
+        return await service.get(parsed_job_id, parsed_inference_id)
+    except Exception as error:
+        raise inference_api_error(error) from error
 
 
 @router.post(

@@ -14,6 +14,12 @@ from frame_worker.orchestration.exports import (
     fail_unleased_export,
 )
 from frame_worker.orchestration.failures import classify_failure
+from frame_worker.orchestration.inference import (
+    InferenceError,
+    PermanentInferenceError,
+    fail_inference,
+    run_annotation_inference,
+)
 from frame_worker.orchestration.repository import JobRepository
 from frame_worker.orchestration.runner import (
     JobRunner,
@@ -217,3 +223,57 @@ def train_annotation_model(self, training_id: str) -> None:
         except MaxRetriesExceededError as exhausted:
             fail_unleased_training(parsed, settings)
             raise TerminalTaskError("TRAINING_RETRY_EXHAUSTED") from exhausted
+
+
+@celery_app.task(
+    bind=True,
+    name="frame_worker.auto_label_annotations",
+    max_retries=2,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    ignore_result=True,
+    soft_time_limit=1800,
+    time_limit=1860,
+)
+def auto_label_annotations(self, inference_id: str) -> None:
+    try:
+        parsed = UUID(inference_id)
+        if str(parsed) != inference_id:
+            raise ValueError
+    except (TypeError, ValueError) as error:
+        raise Reject("Invalid inference identifier", requeue=False) from error
+    try:
+        run_annotation_inference(parsed, settings)
+    except PermanentInferenceError as error:
+        fail_inference(
+            parsed,
+            settings,
+            "INFERENCE_INVALID",
+            getattr(error, "inference_generation", None),
+        )
+        logger.warning("Automatic labeling permanently failed inference_id=%s", parsed)
+        raise
+    except SoftTimeLimitExceeded as error:
+        fail_inference(
+            parsed,
+            settings,
+            "INFERENCE_TIMEOUT",
+            getattr(error, "inference_generation", None),
+        )
+        raise TerminalTaskError("INFERENCE_TIMEOUT") from error
+    except Exception as error:
+        countdown = min(60, (2**self.request.retries) * 5) + random.uniform(0, 2)
+        if self.request.retries < self.max_retries:
+            raise self.retry(
+                exc=InferenceError(str(error)), countdown=countdown
+            ) from error
+        try:
+            raise self.retry(countdown=countdown) from error
+        except MaxRetriesExceededError as exhausted:
+            fail_inference(
+                parsed,
+                settings,
+                "INFERENCE_RETRY_EXHAUSTED",
+                getattr(error, "inference_generation", None),
+            )
+            raise TerminalTaskError("INFERENCE_RETRY_EXHAUSTED") from exhausted

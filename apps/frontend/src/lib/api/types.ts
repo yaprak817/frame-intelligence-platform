@@ -141,3 +141,11 @@ export interface AnnotationTraining {
   progress_completed: number; progress_total: number; model_version: number | null;
   status_url: string; snapshot_download_url: string | null;
 }
+
+export type AnnotationInferenceStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+export interface AnnotationInference {
+  id: string; training_id: string; model_version: number; status: AnnotationInferenceStatus;
+  target_image_count: number; processed_image_count: number; created_box_count: number;
+  created_at: string; started_at: string | null; completed_at: string | null; failure_code: string | null;
+  status_url: string;
+}

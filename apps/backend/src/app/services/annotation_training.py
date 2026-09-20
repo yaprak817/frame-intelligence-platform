@@ -216,7 +216,7 @@ class AnnotationTrainingService:
             await self.session.rollback()
             raise AnnotationTrainingInvalidDataset
 
-        metadata = self._metadata(manifest)
+        metadata = await self._metadata_for_project(project, images, manifest)
         if any(item.image_index not in metadata for item in images):
             await self.session.rollback()
             raise AnnotationTrainingSourceChanged
@@ -397,7 +397,10 @@ class AnnotationTrainingService:
             response = self.response(item, job_id)
             await self.session.rollback()
             return response, False
-        if item.status != AnnotationTrainingStatus.SNAPSHOT_READY:
+        if item.status not in {
+            AnnotationTrainingStatus.SNAPSHOT_READY,
+            AnnotationTrainingStatus.FAILED,
+        }:
             await self.session.rollback()
             raise AnnotationTrainingInvalidState
         active = await self.session.scalar(
@@ -417,20 +420,37 @@ class AnnotationTrainingService:
         now = datetime.now(UTC)
         item.status = AnnotationTrainingStatus.PENDING
         item.completed_at = None
+        item.failure_code = None
         item.progress_completed = 0
         item.progress_total = int(item.config.get("epochs", 10))
-        self.session.add(
-            AnnotationTrainingOutbox(
-                id=uuid4(),
-                training_id=item.id,
-                event_type="START_ANNOTATION_TRAINING",
-                payload={"training_id": str(item.id)},
-                created_at=now,
-                published_at=None,
-                attempt_count=0,
-                next_attempt_at=now,
+        outbox = await self.session.scalar(
+            select(AnnotationTrainingOutbox)
+            .where(
+                AnnotationTrainingOutbox.training_id == item.id,
+                AnnotationTrainingOutbox.event_type == "START_ANNOTATION_TRAINING",
             )
+            .with_for_update()
         )
+
+        if outbox is None:
+            self.session.add(
+                AnnotationTrainingOutbox(
+                    id=uuid4(),
+                    training_id=item.id,
+                    event_type="START_ANNOTATION_TRAINING",
+                    payload={"training_id": str(item.id)},
+                    created_at=now,
+                    published_at=None,
+                    attempt_count=0,
+                    next_attempt_at=now,
+                )
+            )
+        else:
+            outbox.payload = {"training_id": str(item.id)}
+            outbox.created_at = now
+            outbox.published_at = None
+            outbox.attempt_count = 0
+            outbox.next_attempt_at = now
         try:
             await self.session.commit()
         except IntegrityError:
@@ -606,6 +626,47 @@ class AnnotationTrainingService:
             if revision_winner is not None:
                 raise AnnotationTrainingRevisionAlreadySnapshotted from None
         raise error
+
+    async def _metadata_for_project(
+        self,
+        project: AnnotationProject,
+        images: list[AnnotationImage],
+        anchor_manifest: StoredManifestV1 | StoredDatasetManifestV1,
+    ) -> dict[int, tuple]:
+        # Legacy job-level projects keep the original single-manifest behavior.
+        if project.brand_id is None:
+            return self._metadata(anchor_manifest)
+
+        metadata: dict[int, tuple] = {}
+        manifests: dict[UUID, StoredManifestV1 | StoredDatasetManifestV1] = {
+            project.job_id: anchor_manifest
+        }
+
+        for image in images:
+            source_job_id = image.source_job_id or project.job_id
+            source_run_token = image.source_result_run_token or project.result_run_token
+            source_image_index = (
+                image.source_image_index
+                if image.source_image_index is not None
+                else image.image_index
+            )
+
+            manifest = manifests.get(source_job_id)
+            if manifest is None:
+                _job, manifest = await self.results.annotation_source(source_job_id)
+                manifests[source_job_id] = manifest
+
+            if manifest.run_token != source_run_token:
+                raise AnnotationTrainingSourceChanged
+
+            source_metadata = self._metadata(manifest)
+            item = source_metadata.get(source_image_index)
+            if item is None:
+                raise AnnotationTrainingSourceChanged
+
+            metadata[image.image_index] = item
+
+        return metadata
 
     @staticmethod
     def _metadata(

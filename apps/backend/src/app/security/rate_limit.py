@@ -52,7 +52,7 @@ class RedisRateLimiter:
         result = await self._redis.eval(
             _RATE_LIMIT_SCRIPT, 1, key, window_seconds * 1000
         )
-        if not isinstance(result, (list, tuple)) or len(result) != 2:
+        if not isinstance(result, list | tuple) or len(result) != 2:
             raise RuntimeError("Invalid rate-limit response")
         try:
             count, ttl_ms = (int(item) for item in result)
@@ -188,9 +188,33 @@ _ANNOTATION_TRAINING_PATH = re.compile(
     r"(?:/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})?$"
 )
+_CANONICAL_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_BRAND_PATH = re.compile(
+    rf"^/api/v1/brands(?:/{_CANONICAL_UUID}(?:/(?:classes|datasets|annotations))?)?$"
+)
+_AUTO_LABEL_PATH = re.compile(
+    rf"^/api/v1/jobs/{_CANONICAL_UUID}/annotations/auto-label(?:/(?:latest|{_CANONICAL_UUID}))?$"
+)
+_TRAINING_START_PATH = re.compile(
+    rf"^/api/v1/jobs/{_CANONICAL_UUID}/annotations/trainings/{_CANONICAL_UUID}/start$"
+)
 
 
 def protected_group(method: str, path: str) -> tuple[str, str] | None:
+    if method == "POST" and _TRAINING_START_PATH.fullmatch(path):
+        return "annotation-snapshot", "rate_limit_annotation_snapshot_requests"
+    if _BRAND_PATH.fullmatch(path) or _AUTO_LABEL_PATH.fullmatch(path):
+        if method == "GET":
+            return "annotation-read", "rate_limit_annotation_read_requests"
+        if method == "POST":
+            return "annotation-mutation", "rate_limit_annotation_mutation_requests"
+    # Noncanonical UUIDs are rejected by the routes, but still consume the
+    # same rate-limit budget so alternate spellings cannot bypass protection.
+    if path.startswith(("/api/v1/brands/", "/api/v1/jobs/")) and (
+        "/annotations/auto-label" in path or path.startswith("/api/v1/brands/")
+    ):
+        if method == "POST":
+            return "annotation-mutation", "rate_limit_annotation_mutation_requests"
     if _ANNOTATION_TRAINING_PATH.fullmatch(path):
         if method == "POST" and path.endswith("/trainings"):
             return "annotation-snapshot", "rate_limit_annotation_snapshot_requests"

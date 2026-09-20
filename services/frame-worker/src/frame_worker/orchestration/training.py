@@ -303,6 +303,57 @@ def _download_image(client, bucket: str, item: dict, target: Path) -> None:
         raise PermanentTrainingError("Image decode failure") from error
 
 
+def _source_prefix_from_object_key(object_key: str) -> tuple[UUID, UUID, str]:
+    if "\\" in object_key or ".." in object_key.split("/"):
+        raise PermanentTrainingError("Invalid image mapping")
+
+    parts = object_key.split("/")
+    if len(parts) < 6 or parts[0] != "jobs" or parts[2] != "results":
+        raise PermanentTrainingError("Invalid image mapping")
+
+    try:
+        job_id = UUID(parts[1])
+        run_token = UUID(parts[3])
+    except (TypeError, ValueError) as error:
+        raise PermanentTrainingError("Invalid image mapping") from error
+
+    if str(job_id) != parts[1] or str(run_token) != parts[3]:
+        raise PermanentTrainingError("Invalid image mapping")
+
+    prefix = f"jobs/{job_id}/results/{run_token}/"
+    if not object_key.startswith(prefix):
+        raise PermanentTrainingError("Invalid image mapping")
+    return job_id, run_token, prefix
+
+
+def _validate_source_prefixes(engine, bucket: str, image_rows: list[dict]) -> set[str]:
+    sources: dict[tuple[UUID, UUID], str] = {}
+    for item in image_rows:
+        job_id, run_token, prefix = _source_prefix_from_object_key(
+            item["source_object_key"]
+        )
+        sources[(job_id, run_token)] = prefix
+
+    allowed: set[str] = set()
+    with engine.connect() as connection:
+        for (job_id, _run_token), prefix in sources.items():
+            job = (
+                connection.execute(select(jobs).where(jobs.c.id == job_id))
+                .mappings()
+                .one_or_none()
+            )
+            if job is None or job["status"] != "SUCCEEDED":
+                raise PermanentTrainingError("Snapshot ownership changed")
+
+            expected_reference = f"s3://{bucket}/{prefix}manifest.json"
+            if job["result_reference"] != expected_reference:
+                raise PermanentTrainingError("Snapshot source changed")
+
+            allowed.add(prefix)
+
+    return allowed
+
+
 def _snapshot(
     engine, client, bucket: str, claim: Claim, root: Path, settings: WorkerSettings
 ) -> Path:
@@ -353,6 +404,8 @@ def _snapshot(
     source_prefix = f"jobs/{project['job_id']}/results/{project['result_run_token']}/"
     if job["result_reference"] != f"s3://{bucket}/{source_prefix}manifest.json":
         raise PermanentTrainingError("Snapshot source changed")
+
+    allowed_source_prefixes = _validate_source_prefixes(engine, bucket, image_rows)
     if (
         len(image_rows) != claim.row["selected_image_count"]
         or len(class_rows) != claim.row["selected_class_count"]
@@ -375,10 +428,9 @@ def _snapshot(
     for position, item in enumerate(image_rows, 1):
         if item["split"] not in {"train", "val"}:
             raise PermanentTrainingError("Invalid split")
-        if (
-            not item["source_object_key"].startswith(source_prefix)
-            or ".." in item["source_object_key"].split("/")
-            or "\\" in item["source_object_key"]
+        if not any(
+            item["source_object_key"].startswith(prefix)
+            for prefix in allowed_source_prefixes
         ):
             raise PermanentTrainingError("Invalid image mapping")
         extension = ".jpg" if item["source_content_type"] == "image/jpeg" else ".png"

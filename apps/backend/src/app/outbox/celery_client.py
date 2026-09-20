@@ -7,6 +7,7 @@ PROCESS_VIDEO_TASK = "frame_worker.process_video"
 PROCESS_IMAGE_DATASET_TASK = "frame_worker.process_image_dataset"
 CREATE_FRAME_EXPORT_TASK = "frame_worker.create_frame_export"
 TRAIN_ANNOTATION_MODEL_TASK = "frame_worker.train_annotation_model"
+AUTO_LABEL_ANNOTATIONS_TASK = "frame_worker.auto_label_annotations"
 
 
 class JobMessagePublisher(Protocol):
@@ -14,6 +15,7 @@ class JobMessagePublisher(Protocol):
     def publish_image_dataset(self, job_id: UUID) -> None: ...
     def publish_export(self, export_id: UUID) -> None: ...
     def publish_training(self, training_id: UUID) -> None: ...
+    def publish_inference(self, inference_id: UUID) -> None: ...
 
 
 class CeleryJobMessagePublisher:
@@ -64,6 +66,13 @@ class CeleryJobMessagePublisher:
         self._app.send_task(
             TRAIN_ANNOTATION_MODEL_TASK,
             kwargs={"training_id": str(training_id)},
+            queue=self._ml_task_queue,
+        )
+
+    def publish_inference(self, inference_id: UUID) -> None:
+        self._app.send_task(
+            AUTO_LABEL_ANNOTATIONS_TASK,
+            kwargs={"inference_id": str(inference_id)},
             queue=self._ml_task_queue,
         )
 

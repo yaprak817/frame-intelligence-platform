@@ -24,6 +24,12 @@ const CODE_MESSAGES: Record<string, string> = {
   ANNOTATION_SOURCE_CHANGED: "Veri seti değişti. Sayfayı yenileyin.",
   ANNOTATION_NOT_AVAILABLE: "Bu iş için etiketleme kullanılamıyor.",
   ANNOTATION_STORAGE_UNAVAILABLE: "Etiketleme servisine şu anda ulaşılamıyor.",
+  ANNOTATION_INFERENCE_NOT_FOUND: "Otomatik etiketleme çalışması bulunamadı.",
+  ANNOTATION_INFERENCE_MODEL_NOT_FOUND: "Otomatik etiketleme için önce bir modeli başarıyla eğitin.",
+  ANNOTATION_INFERENCE_NO_TARGETS: "Otomatik etiketlenecek boş görsel bulunamadı.",
+  ANNOTATION_INFERENCE_MODEL_CLASSES_STALE: "Eğitilen modelin sınıfları değişti. Modeli yeniden eğitin.",
+  ANNOTATION_INFERENCE_DISPATCH_FAILED: "Otomatik etiketleme kuyruğa alınamadı. Lütfen yeniden deneyin.",
+  ANNOTATION_INFERENCE_UNAVAILABLE: "Otomatik etiketleme servisine şu anda ulaşılamıyor.",
 };
 
 const STATUS_MESSAGES: Record<number, string> = {

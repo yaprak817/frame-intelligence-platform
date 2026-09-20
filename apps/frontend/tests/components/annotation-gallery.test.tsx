@@ -9,6 +9,9 @@ const api = vi.hoisted(() => ({
   listAnnotationTrainings: vi.fn(),
   createAndStartAnnotationTraining: vi.fn(),
   getAnnotationTraining: vi.fn(),
+  getLatestAnnotationInference: vi.fn(),
+  startAnnotationInference: vi.fn(),
+  getAnnotationInference: vi.fn(),
 }));
 vi.mock("@/lib/api/client", () => api);
 import { AnnotationGallery, POLL_MAX_DELAY_MS, POLL_MAX_RETRIES, trainingPollRetryDelay } from "@/components/annotations/annotation-gallery";
@@ -47,6 +50,9 @@ describe("annotation gallery", () => {
     api.listAnnotationTrainings.mockReset().mockResolvedValue([]);
     api.createAndStartAnnotationTraining.mockReset();
     api.getAnnotationTraining.mockReset();
+    api.getLatestAnnotationInference.mockReset().mockResolvedValue(null);
+    api.startAnnotationInference.mockReset();
+    api.getAnnotationInference.mockReset();
   });
 
   it("renders cards, safe lazy previews, status and count", async () => {
@@ -60,6 +66,7 @@ describe("annotation gallery", () => {
     expect(screen.getByText("1.250 sn")).toBeVisible();
     expect(screen.getAllByText("640×640").length).toBeGreaterThan(0);
     expect(document.body.innerHTML).not.toMatch(/backend:8000|minio:9000|run_token|object_key|bucket/i);
+    expect(screen.queryByRole("button", { name: "Otomatik etiketle" })).not.toBeInTheDocument();
   });
 
   it("filters, sorts and keeps pagination boundaries safe", async () => {
@@ -78,10 +85,61 @@ describe("annotation gallery", () => {
     expect(screen.getAllByRole("link").find((link) => link.classList.contains("annotation-card"))).toHaveAttribute("href", `/jobs/${jobId}/annotations/12`);
   });
 
+
+  it("starts automatic labeling once after a successful model", async () => {
+    const succeeded = {
+      ...running, status: "SUCCEEDED", progress_completed: 1,
+      completed_at: "2026-09-14T00:00:03Z", model_version: 1,
+      snapshot_download_url: `${running.status_url}/snapshot/download`,
+    } as const;
+    const inference = {
+      id: "55555555-5555-4555-8555-555555555555",
+      training_id: succeeded.id, model_version: 1, status: "PENDING",
+      target_image_count: 12, processed_image_count: 0, created_box_count: 0,
+      created_at: "2026-09-16T00:00:00Z", started_at: null, completed_at: null,
+      failure_code: null,
+      status_url: `/api/v1/jobs/${jobId}/annotations/auto-label/55555555-5555-4555-8555-555555555555`,
+    } as const;
+    api.listAnnotationTrainings.mockResolvedValue([succeeded]);
+    let finish!: (value: typeof inference) => void;
+    api.startAnnotationInference.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    render(<AnnotationGallery jobId={jobId} />);
+    const button = await screen.findByRole("button", { name: "Otomatik etiketle" });
+    await act(async () => { button.click(); button.click(); });
+    expect(api.startAnnotationInference).toHaveBeenCalledTimes(1);
+    await act(async () => finish(inference));
+    expect(screen.getByRole("button", { name: "Otomatik etiketleniyor…" })).toBeDisabled();
+  });
+
   it("does not duplicate project creation under Strict Mode", async () => {
     render(<StrictMode><AnnotationGallery jobId={jobId} /></StrictMode>);
     await screen.findByText("1 / 13 manuel etiketlendi");
     await waitFor(() => expect(api.getOrCreateAnnotationProject).toHaveBeenCalledTimes(1));
+  });
+
+  it("requires 50 completed images for the visible training action", async () => {
+    api.getOrCreateAnnotationProject.mockResolvedValue({
+      ...project,
+      images: Array.from({ length: 49 }, (_, index) => ({ ...images[0], index, completed: true })),
+      total_images: 49,
+    });
+    render(<AnnotationGallery jobId={jobId} />);
+    const button = await screen.findByRole("button", { name: "Modeli eğit" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/En az 50 tamamlanmış/)).toBeVisible();
+    button.click();
+    expect(api.createAndStartAnnotationTraining).not.toHaveBeenCalled();
+  });
+
+  it("does not offer the previous job's model after a job change", async () => {
+    const succeeded = { ...running, status: "SUCCEEDED", model_version: 1 };
+    api.listAnnotationTrainings.mockResolvedValue([succeeded]);
+    const view = render(<AnnotationGallery jobId={jobId} />);
+    expect(await screen.findByRole("button", { name: "Otomatik etiketle" })).toBeEnabled();
+    const nextJob = "22222222-2222-4222-8222-222222222222";
+    view.rerender(<AnnotationGallery jobId={nextJob} />);
+    expect(screen.queryByRole("button", { name: "Otomatik etiketle" })).not.toBeInTheDocument();
+    expect(api.startAnnotationInference).not.toHaveBeenCalled();
   });
 });
 
