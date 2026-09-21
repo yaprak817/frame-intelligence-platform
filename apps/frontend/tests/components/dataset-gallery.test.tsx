@@ -4,12 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DatasetGallery } from "@/components/results/dataset-gallery";
 import { ResultView } from "@/components/results/result-view";
 
-const jobId = "11111111-1111-4111-8111-111111111111";
-
 const { getDatasetResult, getJobStatus } = vi.hoisted(() => ({
   getDatasetResult: vi.fn(),
   getJobStatus: vi.fn(),
 }));
+const { routerPush } = vi.hoisted(() => ({ routerPush: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
 vi.mock("@/lib/api/client", () => ({ getDatasetResult, getJobStatus }));
 vi.mock("@/components/results/result-gallery", () => ({
   ResultGallery: () => <div>video-gallery</div>,
@@ -17,6 +17,7 @@ vi.mock("@/components/results/result-gallery", () => ({
 
 describe("dataset result gallery", () => {
   beforeEach(() => {
+    routerPush.mockReset();
     getJobStatus.mockReset();
     getDatasetResult.mockResolvedValue({
       schema_version: 1,
@@ -76,7 +77,7 @@ describe("dataset result gallery", () => {
       });
       render(<ResultView jobId="11111111-1111-4111-8111-111111111111" />);
       expect(await screen.findByRole("alert")).toHaveTextContent(
-        "Sonuç türü doğrulanamadı",
+        "Kareler henüz hazır değil.",
       );
       expect(screen.queryByText("video-gallery")).not.toBeInTheDocument();
     },
@@ -105,7 +106,13 @@ describe("dataset result gallery", () => {
     });
     render(<ResultView jobId="11111111-1111-4111-8111-111111111111" />);
     expect(await screen.findByText(expected)).toBeVisible();
-    expect(screen.getByRole("link", { name: "Etiketlemeye başla" })).toHaveAttribute("href", `/jobs/${jobId}/annotations`);
+    expect(screen.getByRole("button", { name: "Etiketlemeye Başla" })).toBeEnabled();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Etiketlemeye Başla" }));
+    await vi.waitFor(() =>
+      expect(routerPush).toHaveBeenCalledWith(
+        "/jobs/11111111-1111-4111-8111-111111111111/annotations",
+      ),
+    );
   });
 
   it("rejects a source and result discriminator mismatch", async () => {

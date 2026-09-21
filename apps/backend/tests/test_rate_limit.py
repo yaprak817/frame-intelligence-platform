@@ -224,6 +224,7 @@ def middleware_app(limiter) -> FastAPI:
         rate_limit_result_requests=10,
         rate_limit_annotation_read_requests=2,
         rate_limit_annotation_mutation_requests=2,
+        rate_limit_annotation_snapshot_requests=2,
         annotation_max_payload_bytes=256 * 1024,
         rate_limit_window_seconds=60,
     )
@@ -249,6 +250,56 @@ def test_real_http_429_and_health_exclusion() -> None:
     assert rejected.headers["Retry-After"] == "7"
     assert rejected.json()["detail"]["code"] == "RATE_LIMITED"
     assert health.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "path,group",
+    [
+        ("/api/v1/brands", "annotation-mutation"),
+        (
+            "/api/v1/brands/11111111-1111-4111-8111-111111111111/classes",
+            "annotation-mutation",
+        ),
+        (
+            "/api/v1/brands/11111111-1111-4111-8111-111111111111/datasets",
+            "annotation-mutation",
+        ),
+        (
+            "/api/v1/brands/11111111-1111-4111-8111-111111111111/annotations",
+            "annotation-mutation",
+        ),
+        (
+            "/api/v1/jobs/11111111-1111-4111-8111-111111111111/annotations/auto-label",
+            "annotation-mutation",
+        ),
+        (
+            "/api/v1/jobs/11111111-1111-4111-8111-111111111111/annotations/trainings/22222222-2222-4222-8222-222222222222/start",
+            "annotation-snapshot",
+        ),
+    ],
+)
+def test_new_mutations_are_rate_limited(path: str, group: str) -> None:
+    assert protected_group("POST", path)[0] == group
+    with TestClient(
+        middleware_app(FixedLimiter(RateLimitDecision(False, 7)))
+    ) as client:
+        response = client.post(path)
+    assert response.status_code == 429
+    assert response.json()["detail"]["code"] == "RATE_LIMITED"
+
+
+def test_brand_reads_and_noncanonical_mutations_remain_protected() -> None:
+    brand = "/api/v1/brands/11111111-1111-4111-8111-111111111111"
+    assert protected_group("GET", "/api/v1/brands")[0] == "annotation-read"
+    assert protected_group("GET", brand)[0] == "annotation-read"
+    assert protected_group("GET", brand + "/annotations")[0] == "annotation-read"
+    assert (
+        protected_group(
+            "POST", "/api/v1/brands/" + brand.rsplit("/", 1)[1].upper() + "/classes"
+        )[0]
+        == "annotation-mutation"
+    )
+    assert protected_group("POST", brand + "/datasets/")[0] == "annotation-mutation"
 
 
 def test_real_http_redis_outage_is_safe_503() -> None:

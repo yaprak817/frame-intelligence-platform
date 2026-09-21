@@ -28,12 +28,17 @@ class AnnotationProject(Base):
         UniqueConstraint(
             "job_id", "result_run_token", name="uq_annotation_projects_job_run"
         ),
+        UniqueConstraint("brand_id", name="uq_annotation_projects_brand_id"),
         CheckConstraint("revision >= 0", name="ck_annotation_projects_revision"),
         Index("ix_annotation_projects_job", "job_id"),
+        Index("ix_annotation_projects_brand", "brand_id"),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True)
     job_id: Mapped[UUID] = mapped_column(
         ForeignKey("processing_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    brand_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=True
     )
     result_run_token: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
@@ -78,18 +83,35 @@ class AnnotationClass(Base):
 class AnnotationImage(Base):
     __tablename__ = "annotation_images"
     __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "source_job_id",
+            "source_result_run_token",
+            "source_image_index",
+            name="uq_annotation_images_source",
+        ),
         CheckConstraint("image_index >= 0", name="ck_annotation_images_index"),
+        CheckConstraint(
+            "source_image_index IS NULL OR source_image_index >= 0",
+            name="ck_annotation_images_source_index",
+        ),
         CheckConstraint(
             "image_sha256 ~ '^[0-9a-f]{64}$'", name="ck_annotation_images_sha256"
         ),
         CheckConstraint(
             "yolo_sha256 ~ '^[0-9a-f]{64}$'", name="ck_annotation_images_yolo_sha256"
         ),
+        Index("ix_annotation_images_source_job", "source_job_id", "source_image_index"),
     )
     project_id: Mapped[UUID] = mapped_column(
         ForeignKey("annotation_projects.id", ondelete="CASCADE"), primary_key=True
     )
     image_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("processing_jobs.id", ondelete="RESTRICT"), nullable=True
+    )
+    source_result_run_token: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    source_image_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     image_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     image_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     yolo_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -133,11 +155,15 @@ class AnnotationBox(Base):
         ),
         Index("ix_annotation_boxes_project_image", "project_id", "image_index"),
         Index("ix_annotation_boxes_project_class", "project_id", "class_id"),
+        Index("ix_annotation_boxes_auto_label_run", "auto_label_run_id"),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True)
     project_id: Mapped[UUID] = mapped_column(nullable=False)
     image_index: Mapped[int] = mapped_column(Integer, nullable=False)
     class_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    auto_label_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("annotation_inference_runs.id", ondelete="SET NULL")
+    )
     x_center: Mapped[Decimal] = mapped_column(Numeric(9, 8), nullable=False)
     y_center: Mapped[Decimal] = mapped_column(Numeric(9, 8), nullable=False)
     width: Mapped[Decimal] = mapped_column(Numeric(9, 8), nullable=False)

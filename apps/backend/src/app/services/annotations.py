@@ -13,6 +13,7 @@ from app.models.annotations import (
     AnnotationImage,
     AnnotationProject,
 )
+from app.models.brands import Brand, BrandClass, BrandDataset
 from app.schemas.annotations import (
     AnnotationBoxResponse,
     AnnotationClassMutationResponse,
@@ -26,8 +27,17 @@ from app.schemas.annotations import (
     UpdateAnnotationClassRequest,
 )
 from app.schemas.artifacts import StoredDatasetManifestV1
-from app.services.result_artifacts import ResultArtifactService
+from app.services.result_artifacts import (
+    FailedResultUnavailableError,
+    ResultArtifactService,
+    ResultJobNotFoundError,
+    ResultNotReadyError,
+)
 from app.storage.s3 import ObjectStream
+
+MAX_BRAND_DATASETS = 100
+MAX_BRAND_IMAGES = 1000
+MAX_BRAND_CLASSES = 100
 
 
 class AnnotationError(RuntimeError):
@@ -36,6 +46,10 @@ class AnnotationError(RuntimeError):
 
 class AnnotationNotAvailable(AnnotationError):
     pass
+
+
+class AnnotationBrandConflict(AnnotationError):
+    code = "ANNOTATION_BRAND_CONFLICT"
 
 
 class AnnotationRevisionConflict(AnnotationError):
@@ -145,6 +159,202 @@ class AnnotationService:
                 raise AnnotationNotAvailable from None
             return winner, False
 
+    async def get_or_create_brand(
+        self, brand_id: UUID
+    ) -> tuple[AnnotationProject, bool]:
+        brand = await self.session.get(Brand, brand_id)
+        if brand is None:
+            raise AnnotationNotAvailable
+
+        datasets = list(
+            (
+                await self.session.scalars(
+                    select(BrandDataset)
+                    .where(
+                        BrandDataset.brand_id == brand_id,
+                        BrandDataset.job_id.is_not(None),
+                    )
+                    .order_by(BrandDataset.created_at.asc())
+                    .limit(MAX_BRAND_DATASETS + 1)
+                )
+            ).all()
+        )
+        if len(datasets) > MAX_BRAND_DATASETS:
+            raise AnnotationLimitExceeded
+
+        sources: list[tuple[UUID, object]] = []
+        for dataset in datasets:
+            if dataset.job_id is None:
+                continue
+            try:
+                _job, manifest = await self.results.annotation_source(dataset.job_id)
+            except (
+                ResultJobNotFoundError,
+                ResultNotReadyError,
+                FailedResultUnavailableError,
+            ):
+                continue
+            sources.append((dataset.job_id, manifest))
+
+        if not sources:
+            raise AnnotationNotAvailable
+
+        project = await self.session.scalar(
+            select(AnnotationProject).where(AnnotationProject.brand_id == brand_id)
+        )
+        created = False
+
+        if project is None:
+            candidates: list[AnnotationProject] = []
+            seen_ids: set[UUID] = set()
+            for source_job_id, manifest in sources:
+                candidate = await self._project(source_job_id, manifest.run_token)
+                if candidate is not None and candidate.brand_id not in {None, brand_id}:
+                    raise AnnotationBrandConflict
+                if candidate is not None and candidate.id not in seen_ids:
+                    candidates.append(candidate)
+                    seen_ids.add(candidate.id)
+
+            if len(candidates) > 1:
+                raise AnnotationNotAvailable
+
+            if candidates:
+                project = candidates[0]
+            else:
+                project, created = await self.get_or_create(sources[0][0])
+
+            project = await self.session.scalar(
+                select(AnnotationProject)
+                .where(AnnotationProject.id == project.id)
+                .with_for_update()
+            )
+            if project is None or project.brand_id not in {None, brand_id}:
+                raise AnnotationBrandConflict
+            project.brand_id = brand_id
+
+        rows = list(
+            (
+                await self.session.scalars(
+                    select(AnnotationImage)
+                    .where(AnnotationImage.project_id == project.id)
+                    .order_by(AnnotationImage.image_index)
+                    .limit(MAX_BRAND_IMAGES + 1)
+                )
+            ).all()
+        )
+        if len(rows) > MAX_BRAND_IMAGES:
+            raise AnnotationLimitExceeded
+
+        for image in rows:
+            if image.source_job_id is None:
+                image.source_job_id = project.job_id
+                image.source_result_run_token = project.result_run_token
+                image.source_image_index = image.image_index
+
+        existing_sources = {
+            (
+                image.source_job_id,
+                image.source_result_run_token,
+                image.source_image_index,
+            )
+            for image in rows
+            if image.source_job_id is not None
+            and image.source_result_run_token is not None
+            and image.source_image_index is not None
+        }
+        next_index = max((image.image_index for image in rows), default=-1) + 1
+        now = datetime.now(UTC)
+
+        additions: list[AnnotationImage] = []
+        for source_job_id, manifest in sources:
+            for (
+                source_index,
+                filename,
+                image_sha256,
+                preview_sha256,
+            ) in self._manifest_images(manifest):
+                source_key = (source_job_id, manifest.run_token, source_index)
+                if source_key in existing_sources:
+                    continue
+                additions.append(
+                    AnnotationImage(
+                        project_id=project.id,
+                        image_index=next_index,
+                        source_job_id=source_job_id,
+                        source_result_run_token=manifest.run_token,
+                        source_image_index=source_index,
+                        image_filename=filename,
+                        image_sha256=image_sha256,
+                        yolo_sha256=preview_sha256,
+                        completed=False,
+                        updated_at=now,
+                    )
+                )
+                existing_sources.add(source_key)
+                next_index += 1
+                if len(rows) + len(additions) > MAX_BRAND_IMAGES:
+                    raise AnnotationLimitExceeded
+
+        if additions:
+            self.session.add_all(additions)
+
+        brand_classes = list(
+            (
+                await self.session.scalars(
+                    select(BrandClass)
+                    .where(BrandClass.brand_id == brand_id)
+                    .order_by(BrandClass.created_at.asc())
+                    .limit(MAX_BRAND_CLASSES + 1)
+                )
+            ).all()
+        )
+        if len(brand_classes) > MAX_BRAND_CLASSES:
+            raise AnnotationLimitExceeded
+        project_classes = list(
+            (
+                await self.session.scalars(
+                    select(AnnotationClass)
+                    .where(AnnotationClass.project_id == project.id)
+                    .order_by(AnnotationClass.yolo_index)
+                )
+            ).all()
+        )
+        class_names = {item.normalized_name for item in project_classes}
+        next_yolo_index = (
+            max((item.yolo_index for item in project_classes), default=-1) + 1
+        )
+
+        for brand_class in brand_classes:
+            normalized = self._name_key(brand_class.name)
+            if normalized in class_names:
+                continue
+            self.session.add(
+                AnnotationClass(
+                    id=uuid4(),
+                    project_id=project.id,
+                    yolo_index=next_yolo_index,
+                    name=brand_class.name,
+                    normalized_name=normalized,
+                    color=brand_class.color.upper(),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            class_names.add(normalized)
+            next_yolo_index += 1
+
+        project.updated_at = now
+        await self.session.commit()
+        return project, created
+
+    async def get_brand(self, brand_id: UUID) -> AnnotationProject:
+        project = await self.session.scalar(
+            select(AnnotationProject).where(AnnotationProject.brand_id == brand_id)
+        )
+        if project is None:
+            raise AnnotationNotAvailable
+        return project
+
     async def get(self, job_id: UUID) -> AnnotationProject:
         job, manifest = await self.results.annotation_source(job_id)
         project = await self._project(job_id, manifest.run_token)
@@ -155,25 +365,6 @@ class AnnotationService:
     async def response(
         self, project: AnnotationProject, page: int, page_size: int
     ) -> AnnotationProjectResponse:
-        _job, manifest = await self.results.annotation_source(project.job_id)
-        if manifest.run_token != project.result_run_token:
-            raise AnnotationSourceChanged
-        metadata = (
-            {
-                image.index: (image.output_width, image.output_height, None)
-                for image in manifest.images
-                if image.quality_category in {"normal", "challenging"}
-                and image.object_key is not None
-                and image.yolo_object_key is not None
-                and image.output_width == 640
-                and image.output_height == 640
-            }
-            if isinstance(manifest, StoredDatasetManifestV1)
-            else {
-                frame.index: (frame.width, frame.height, frame.timestamp_ms)
-                for frame in manifest.frames
-            }
-        )
         classes = list(
             (
                 await self.session.scalars(
@@ -206,8 +397,90 @@ class AnnotationService:
                 .limit(page_size)
             )
         ).all()
-        if any(image.image_index not in metadata for image, _count in rows):
-            raise AnnotationSourceChanged
+
+        if project.brand_id is None:
+            _job, manifest = await self.results.annotation_source(project.job_id)
+            if manifest.run_token != project.result_run_token:
+                raise AnnotationSourceChanged
+            metadata = (
+                {
+                    image.index: (image.output_width, image.output_height, None)
+                    for image in manifest.images
+                    if image.quality_category in {"normal", "challenging"}
+                    and image.object_key is not None
+                    and image.yolo_object_key is not None
+                    and image.output_width == 640
+                    and image.output_height == 640
+                }
+                if isinstance(manifest, StoredDatasetManifestV1)
+                else {
+                    frame.index: (frame.width, frame.height, frame.timestamp_ms)
+                    for frame in manifest.frames
+                }
+            )
+            if any(image.image_index not in metadata for image, _count in rows):
+                raise AnnotationSourceChanged
+        else:
+            metadata: dict[int, tuple[int, int, int | None]] = {}
+            manifest_cache: dict[UUID, object] = {}
+
+            for image, _count in rows:
+                source_job_id = image.source_job_id
+                source_run_token = image.source_result_run_token
+                source_index = image.source_image_index
+                if (
+                    source_job_id is None
+                    or source_run_token is None
+                    or source_index is None
+                ):
+                    raise AnnotationSourceChanged
+
+                manifest = manifest_cache.get(source_job_id)
+                if manifest is None:
+                    _job, manifest = await self.results.annotation_source(source_job_id)
+                    manifest_cache[source_job_id] = manifest
+
+                if manifest.run_token != source_run_token:
+                    raise AnnotationSourceChanged
+
+                if isinstance(manifest, StoredDatasetManifestV1):
+                    source_item = next(
+                        (
+                            item
+                            for item in manifest.images
+                            if item.index == source_index
+                            and item.quality_category in {"normal", "challenging"}
+                            and item.object_key is not None
+                            and item.yolo_object_key is not None
+                            and item.output_width == 640
+                            and item.output_height == 640
+                        ),
+                        None,
+                    )
+                    if source_item is None:
+                        raise AnnotationSourceChanged
+                    metadata[image.image_index] = (
+                        source_item.output_width,
+                        source_item.output_height,
+                        None,
+                    )
+                else:
+                    source_item = next(
+                        (
+                            item
+                            for item in manifest.frames
+                            if item.index == source_index
+                        ),
+                        None,
+                    )
+                    if source_item is None:
+                        raise AnnotationSourceChanged
+                    metadata[image.image_index] = (
+                        source_item.width,
+                        source_item.height,
+                        source_item.timestamp_ms,
+                    )
+
         return AnnotationProjectResponse(
             id=project.id,
             job_id=project.job_id,
@@ -434,9 +707,18 @@ class AnnotationService:
         image = await self.session.get(AnnotationImage, (project.id, image_index))
         if image is None:
             raise AnnotationImageNotFound
+
+        source_job_id = image.source_job_id or project.job_id
+        source_run_token = image.source_result_run_token or project.result_run_token
+        source_image_index = (
+            image.source_image_index
+            if image.source_image_index is not None
+            else image_index
+        )
+
         try:
             return await self.results.annotation_preview(
-                project.job_id, project.result_run_token, image_index
+                source_job_id, source_run_token, source_image_index
             )
         except Exception as error:
             from app.services.result_artifacts import (
@@ -449,6 +731,23 @@ class AnnotationService:
             if isinstance(error, ResultUnavailableError):
                 raise AnnotationSourceChanged from error
             raise
+
+    @staticmethod
+    def _manifest_images(manifest):
+        if isinstance(manifest, StoredDatasetManifestV1):
+            return [
+                (image.index, image.filename, image.sha256, image.yolo_sha256)
+                for image in manifest.images
+                if image.quality_category in {"normal", "challenging"}
+                and image.object_key is not None
+                and image.yolo_object_key is not None
+                and image.output_width == 640
+                and image.output_height == 640
+            ]
+        return [
+            (frame.index, frame.filename, frame.sha256, frame.sha256)
+            for frame in manifest.frames
+        ]
 
     async def _cas(self, project: AnnotationProject, expected: int) -> None:
         now = datetime.now(UTC)

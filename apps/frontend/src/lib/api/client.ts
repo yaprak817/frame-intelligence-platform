@@ -14,6 +14,7 @@ import type {
   ImageAnnotations,
   AnnotationBox,
   AnnotationTraining,
+  AnnotationInference,
 } from "./types";
 
 const STATUSES: JobStatus[] = [
@@ -276,10 +277,42 @@ async function annotationRequest(path: string, init: RequestInit = {}): Promise<
 }
 async function createProjectPage(jobId: string, signal?: AbortSignal): Promise<AnnotationProject> {
   if (!ANNOTATION_UUID.test(jobId)) throw new ApiError(404, "ANNOTATION_NOT_AVAILABLE");
+
   const key = jobId.toLowerCase();
-  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(key)}/annotations?page=1&page_size=100`, { method: "POST", signal });
-  if (!isAnnotationProject(value) || value.job_id.toLowerCase() !== key) throw new ApiError(502, "MANIFEST_INVALID");
-  if (!value.images.every((item) => item.preview_url === `/api/v1/jobs/${encodeURIComponent(key)}/annotations/images/${item.index}/preview`)) throw new ApiError(502, "MANIFEST_INVALID");
+  const path = `/api/v1/jobs/${encodeURIComponent(key)}/annotations?page=1&page_size=100`;
+
+  let response = await fetch(path, {
+    method: "GET",
+    cache: "no-store",
+    signal,
+  });
+
+  if (response.status === 404) {
+    response = await fetch(path, {
+      method: "POST",
+      cache: "no-store",
+      signal,
+    });
+  }
+
+  if (!response.ok) throw await errorFromResponse(response);
+
+  const value = await response.json();
+
+  if (!isAnnotationProject(value) || value.job_id.toLowerCase() !== key) {
+    throw new ApiError(502, "MANIFEST_INVALID");
+  }
+
+  if (
+    !value.images.every(
+      (item) =>
+        item.preview_url ===
+        `/api/v1/jobs/${encodeURIComponent(key)}/annotations/images/${item.index}/preview`,
+    )
+  ) {
+    throw new ApiError(502, "MANIFEST_INVALID");
+  }
+
   return value;
 }
 export async function getOrCreateAnnotationProject(jobId: string, signal?: AbortSignal): Promise<AnnotationProject> {
@@ -353,5 +386,39 @@ export async function getAnnotationTraining(jobId: string, statusUrl: string, si
   if (!statusUrl.startsWith(prefix) || statusUrl.includes("\\") || statusUrl.includes("?") || statusUrl.includes("#")) throw new ApiError(502, "MANIFEST_INVALID");
   const value = await annotationRequest(statusUrl, { signal });
   if (!isTraining(value, jobId) || value.status_url !== statusUrl) throw new ApiError(502, "MANIFEST_INVALID");
+  return value;
+}
+
+function isAnnotationInference(value: unknown, jobId: string): value is AnnotationInference {
+  if (!isRecord(value) || !exactKeys(value, ["id", "training_id", "model_version", "status", "target_image_count", "processed_image_count", "created_box_count", "created_at", "started_at", "completed_at", "failure_code", "status_url"])) return false;
+  if (typeof value.id !== "string" || canonicalUuid(value.id) === null || typeof value.training_id !== "string" || canonicalUuid(value.training_id) === null) return false;
+  if (!["PENDING", "RUNNING", "SUCCEEDED", "FAILED"].includes(String(value.status)) || !isSafeInteger(value.model_version, 1) || !isSafeInteger(value.target_image_count, 1) || !isSafeInteger(value.processed_image_count, 0) || Number(value.processed_image_count) > Number(value.target_image_count) || !isSafeInteger(value.created_box_count, 0)) return false;
+  const nullableDate = (candidate: unknown) => candidate === null || isUtcDate(candidate);
+  const expectedStatusUrl = `/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/auto-label/${value.id}`;
+  return isUtcDate(value.created_at) && nullableDate(value.started_at) && nullableDate(value.completed_at) && (value.failure_code === null || typeof value.failure_code === "string") && value.status_url === expectedStatusUrl;
+}
+
+export async function startAnnotationInference(jobId: string, signal?: AbortSignal): Promise<AnnotationInference> {
+  const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/auto-label`, { method: "POST", signal });
+  if (!isAnnotationInference(value, jobId)) throw new ApiError(502, "MANIFEST_INVALID");
+  return value;
+}
+
+export async function getLatestAnnotationInference(jobId: string, signal?: AbortSignal): Promise<AnnotationInference | null> {
+  try {
+    const value = await annotationRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/auto-label/latest`, { signal });
+    if (!isAnnotationInference(value, jobId)) throw new ApiError(502, "MANIFEST_INVALID");
+    return value;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+export async function getAnnotationInference(jobId: string, statusUrl: string, signal?: AbortSignal): Promise<AnnotationInference> {
+  const prefix = `/api/v1/jobs/${encodeURIComponent(jobId)}/annotations/auto-label/`;
+  if (!statusUrl.startsWith(prefix) || statusUrl.includes("\\") || statusUrl.includes("?") || statusUrl.includes("#")) throw new ApiError(502, "MANIFEST_INVALID");
+  const value = await annotationRequest(statusUrl, { signal });
+  if (!isAnnotationInference(value, jobId) || value.status_url !== statusUrl) throw new ApiError(502, "MANIFEST_INVALID");
   return value;
 }

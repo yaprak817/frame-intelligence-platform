@@ -212,6 +212,12 @@ class YtDlpURLAdapter:
             str(workspace),
             "--output",
             "source.%(ext)s",
+            "--js-runtimes",
+            "deno",
+            "--extractor-args",
+            "youtube:player_client=mweb",
+            "--extractor-args",
+            "youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416",
             "--format",
             "bestvideo*+bestaudio/best",
         ]
