@@ -580,7 +580,9 @@ async function browserFlow(baseUrl, videoPath, onVideoSucceeded) {
     await page.locator("#summary-title").waitFor({ state: "visible", timeout: 30_000 });
     const framesSaved = Number(await page.locator(".summary-grid dd").first().textContent());
     if (!Number.isSafeInteger(framesSaved) || framesSaved < 1) throw new Error("Analiz özeti en az bir kaydedilmiş kare göstermiyor.");
-    const image = page.locator(".frame-card img").first();
+    const frameCard = page.locator(".frame-card").first();
+    await frameCard.scrollIntoViewIfNeeded();
+    const image = frameCard.locator("img");
     await image.waitFor({ state: "visible", timeout: 30_000 });
     await image.evaluate((node) => new Promise((resolveImage, rejectImage) => {
       if (node.complete && node.naturalWidth > 0) return resolveImage();
@@ -694,7 +696,9 @@ async function verifyPersistedResultPage(baseUrl, jobId) {
   try {
     await page.goto(`${baseUrl}/jobs/${jobId}/result`, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.locator("#summary-title").waitFor({ state: "visible", timeout: 30_000 });
-    const image = page.locator(".frame-card img").first();
+    const frameCard = page.locator(".frame-card").first();
+    await frameCard.scrollIntoViewIfNeeded();
+    const image = frameCard.locator("img");
     await image.waitFor({ state: "visible", timeout: 30_000 });
     await image.evaluate((node) => new Promise((resolveImage, rejectImage) => {
       if (node.complete && node.naturalWidth > 0) return resolveImage();
