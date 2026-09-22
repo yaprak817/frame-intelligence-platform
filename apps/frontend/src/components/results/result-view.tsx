@@ -309,6 +309,26 @@ function ResolvedResultView({
       const brandId = await resolveCurrentBrandId();
 
       if (!brandId) {
+        const response = await fetch(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/annotations?page=1&page_size=100`,
+          {
+            method: "POST",
+            headers: { Accept: "application/json" },
+          },
+        );
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          const detail =
+            typeof payload?.detail === "string"
+              ? payload.detail
+              : payload?.detail?.message;
+
+          throw new Error(
+            detail ?? "Etiketleme projesi hazırlanamadı.",
+          );
+        }
+
         router.push(`/jobs/${encodeURIComponent(jobId)}/annotations`);
         return;
       }
