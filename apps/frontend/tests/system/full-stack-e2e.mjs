@@ -293,7 +293,7 @@ async function datasetBrowserFlow(baseUrl, paths, archive, temporaryDirectory, e
   const statuses = [];
   const exports = [];
   try {
-    await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
+    await page.goto(`${baseUrl}/jobs/new`, { waitUntil: "networkidle", timeout: 60_000 });
     await page.getByRole("tab", { name: "Görsel veri seti" }).click();
     if (archive) await page.getByRole("radio", { name: "ZIP arşivi" }).click();
     await page.locator(".drop-zone input[type=file]").setInputFiles(paths);
@@ -523,7 +523,7 @@ async function browserFlow(baseUrl, videoPath, onVideoSucceeded) {
     } catch { /* A malformed response is handled by the production UI. */ }
   });
   try {
-    await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
+    await page.goto(`${baseUrl}/jobs/new`, { waitUntil: "networkidle", timeout: 60_000 });
     await page.locator("#video-file").setInputFiles(videoPath);
     await page.locator("#candidate-fps").fill("4");
     await page.locator("#window-seconds").fill("1");
