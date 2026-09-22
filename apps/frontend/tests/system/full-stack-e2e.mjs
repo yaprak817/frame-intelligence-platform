@@ -386,7 +386,7 @@ async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeig
       });
     };
     page.on("request", requestListener);
-    await page.getByRole("link", { name: "Etiketlemeye başla" }).click();
+    await page.getByRole("button", { name: /Etiketlemeye/ }).click();
     await page.getByRole("heading", { name: "Frame ve görsel galerisi" }).waitFor({ state: "visible", timeout: 30_000 });
     const expectedOrigin = new URL(page.url()).origin;
     const firstCard = page.locator("a.annotation-card").first();
