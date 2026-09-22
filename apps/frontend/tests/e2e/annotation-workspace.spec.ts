@@ -23,7 +23,7 @@ test("video result opens the gallery-first annotation workspace and persists a b
   await page.route(`**/api/v1/jobs/${jobId}/annotations/images/*/preview`, (route) => route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#ddd"/></svg>' }));
 
   await page.goto(`/jobs/${jobId}/result`);
-  await page.getByRole("link", { name: "Etiketlemeye başla" }).click();
+  await page.getByRole("button", { name: "Etiketlemeye Ba\u015fla" }).click();
   await expect(page.getByRole("heading", { name: "Frame ve görsel galerisi" })).toBeVisible();
   await expect(page.getByRole("link", { name: /^0\.jpg/ })).toBeVisible();
   await expect(page.getByRole("link", { name: /^1\.jpg/ })).toBeVisible();

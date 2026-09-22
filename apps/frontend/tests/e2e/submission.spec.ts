@@ -18,7 +18,7 @@ test("submits a URL through same-origin API and reaches success", async ({ page 
     const status = polls === 1 ? "RUNNING" : "SUCCEEDED";
     await route.fulfill({ status: 200, json: { id: jobId, status, source_type: "URL", source: "https://example.com/video", created_at: "2026-08-24T10:00:00Z", started_at: "2026-08-24T10:00:01Z", completed_at: status === "SUCCEEDED" ? "2026-08-24T10:00:03Z" : null, failure: null, result: status === "SUCCEEDED" ? { result_kind: "VIDEO_FRAMES", available: true, metadata_url: `/api/v1/jobs/${jobId}/result`, manifest_download_url: `/api/v1/jobs/${jobId}/result/manifest` } : null } });
   });
-  await page.goto("/");
+  await page.goto("/jobs/new");
   const expectedOrigin = new URL(page.url()).origin;
   await page.getByRole("tab", { name: "Video URL’si" }).click();
   const urlInput = page.getByLabel("Video bağlantısı");
