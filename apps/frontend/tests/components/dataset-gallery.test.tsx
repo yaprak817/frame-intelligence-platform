@@ -19,6 +19,33 @@ describe("dataset result gallery", () => {
   beforeEach(() => {
     routerPush.mockReset();
     getJobStatus.mockReset();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+
+        if (url === "/api/v1/brands") {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        if (
+          url.includes("/annotations?page=1&page_size=100") &&
+          init?.method === "POST"
+        ) {
+          return new Response(JSON.stringify({}), {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        throw new Error(`Unexpected fetch in dataset-gallery test: ${url}`);
+      }),
+    );
+
     getDatasetResult.mockResolvedValue({
       schema_version: 1,
       dataset_type: "image",
