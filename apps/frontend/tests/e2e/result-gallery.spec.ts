@@ -16,7 +16,10 @@ test("successful job opens gallery, frame modal and downloads public manifest", 
   await page.goto(`/jobs/${jobId}`);
   await page.getByRole("link", { name: "Sonuçları görüntüle" }).click();
   await expect(page.getByRole("heading", { name: "Analiz özeti" })).toBeVisible();
-  const frame = page.getByRole("button", { name: /büyüt/ }); await frame.click();
+  await page.locator(".frame-card").first().scrollIntoViewIfNeeded();
+  const frame = page.getByRole("button", { name: new RegExp("b\\u00fcy\\u00fct") });
+  await expect(frame).toBeVisible();
+  await frame.click();
   await expect(page.getByRole("dialog")).toBeVisible(); await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).toBeHidden(); await expect(frame).toBeFocused();
   const downloadPromise = page.waitForEvent("download"); await page.getByRole("button", { name: "Public manifesti indir" }).click(); const download = await downloadPromise; expect(download.suggestedFilename()).toBe(`job-${jobId}-manifest.json`);
 });
