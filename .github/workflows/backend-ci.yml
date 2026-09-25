@@ -85,6 +85,7 @@ jobs:
         run: uv sync --locked --dev
 
       - name: Start MinIO
+        working-directory: .
         run: |
           docker build -f deploy/minio/Dockerfile.server -t frame-intelligence-minio-ci deploy/minio
           docker run -d --name frame-intelligence-ci-minio \

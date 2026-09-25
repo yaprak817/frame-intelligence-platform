@@ -100,6 +100,7 @@ jobs:
           uv sync --locked --dev
           uv run alembic upgrade head
       - name: Start MinIO
+        working-directory: .
         run: |
           docker build -f deploy/minio/Dockerfile.server -t frame-intelligence-minio-ci deploy/minio
           docker run -d --name frame-intelligence-ci-minio \
