@@ -85,12 +85,13 @@ jobs:
         run: uv sync --locked --dev
 
       - name: Start MinIO
-        run: >-
-          docker run -d --name frame-intelligence-ci-minio
-          -p 9000:9000
-          -e MINIO_ROOT_USER=frame_admin
-          -e MINIO_ROOT_PASSWORD=test_password
-          quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
+        run: |
+          docker build -f deploy/minio/Dockerfile.server -t frame-intelligence-minio-ci deploy/minio
+          docker run -d --name frame-intelligence-ci-minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=frame_admin \
+            -e MINIO_ROOT_PASSWORD=test_password \
+            frame-intelligence-minio-ci server /data
 
       - name: Wait for MinIO
         run: |

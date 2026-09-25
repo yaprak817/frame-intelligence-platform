@@ -100,12 +100,13 @@ jobs:
           uv sync --locked --dev
           uv run alembic upgrade head
       - name: Start MinIO
-        run: >-
-          docker run -d --name frame-intelligence-ci-minio
-          -p 9000:9000
-          -e MINIO_ROOT_USER=frame_admin
-          -e MINIO_ROOT_PASSWORD=test_password
-          quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
+        run: |
+          docker build -f deploy/minio/Dockerfile.server -t frame-intelligence-minio-ci deploy/minio
+          docker run -d --name frame-intelligence-ci-minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=frame_admin \
+            -e MINIO_ROOT_PASSWORD=test_password \
+            frame-intelligence-minio-ci server /data
       - name: Wait for MinIO
         run: |
           for attempt in {1..30}; do
@@ -180,12 +181,13 @@ jobs:
           echo "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1  ${model}" | sha256sum --check
           printf '%s\n' "YOLO_MODEL_PATH=${model}" >> "$GITHUB_ENV"
       - name: Start task-scoped MinIO
-        run: >-
-          docker run -d --name issue35-async-minio
-          -p 9000:9000
-          -e MINIO_ROOT_USER=frame_admin
-          -e MINIO_ROOT_PASSWORD=test_password
-          quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
+        run: |
+          docker build -f deploy/minio/Dockerfile.server -t frame-intelligence-minio-ci deploy/minio
+          docker run -d --name issue35-async-minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=frame_admin \
+            -e MINIO_ROOT_PASSWORD=test_password \
+            frame-intelligence-minio-ci server /data
       - name: Wait for task-scoped MinIO
         run: |
           for attempt in {1..30}; do
