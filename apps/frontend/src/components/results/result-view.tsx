@@ -352,12 +352,9 @@ function ResolvedResultView({
         );
       }
 
-      const project = (await response.json()) as { job_id?: string };
-      if (!project.job_id) {
-        throw new Error("Etiketleme projesinin kaynak işi bulunamadı.");
-      }
-
-      router.push(`/jobs/${encodeURIComponent(project.job_id)}/annotations`);
+      router.push(
+        `/brands/${encodeURIComponent(brandId)}/annotations`,
+      );
     } catch (caught) {
       setError(
         caught instanceof Error
