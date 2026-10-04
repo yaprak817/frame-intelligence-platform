@@ -10,6 +10,7 @@ const VIDEO_ACCEPT =
   ".avi,.m4v,.mkv,.mov,.mp4,.webm,video/x-msvideo,video/x-m4v,video/x-matroska,video/quicktime,video/mp4,video/webm";
 
 type SourceMode = "upload" | "url";
+const DATASET_PAGE_SIZE = 12;
 
 type BrandClass = {
   id: string;
@@ -62,6 +63,7 @@ export function BrandDetailClient({ brandId }: { brandId: string }) {
   const [className, setClassName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [datasetPage, setDatasetPage] = useState(1);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [sourceMode, setSourceMode] = useState<SourceMode>("upload");
@@ -125,6 +127,7 @@ export function BrandDetailClient({ brandId }: { brandId: string }) {
     queueMicrotask(() => {
       if (mutationGeneration.current !== mutationId) return;
       setBusy(false);
+      setDatasetPage(1);
       setVideoBusy(false);
       setImageBusy(false);
       setError(null);
@@ -265,6 +268,7 @@ export function BrandDetailClient({ brandId }: { brandId: string }) {
       setBrand((current) =>
         current ? { ...current, datasets: [dataset, ...current.datasets] } : current,
       );
+      setDatasetPage(1);
       try {
         window.localStorage.setItem(
           `frame-intelligence:job-brand:${job.job_id}`,
@@ -344,6 +348,7 @@ export function BrandDetailClient({ brandId }: { brandId: string }) {
           ? { ...current, datasets: [dataset, ...current.datasets] }
           : current,
       );
+      setDatasetPage(1);
 
       try {
         window.localStorage.setItem(
@@ -375,6 +380,17 @@ export function BrandDetailClient({ brandId }: { brandId: string }) {
       }
     }
   }
+
+  const datasetPages = Math.max(
+    1,
+    Math.ceil((brand?.datasets.length ?? 0) / DATASET_PAGE_SIZE),
+  );
+  const safeDatasetPage = Math.min(datasetPage, datasetPages);
+  const visibleDatasets =
+    brand?.datasets.slice(
+      (safeDatasetPage - 1) * DATASET_PAGE_SIZE,
+      safeDatasetPage * DATASET_PAGE_SIZE,
+    ) ?? [];
 
   if (!brand || brand.id !== brandId) {
     return (
@@ -502,7 +518,7 @@ export function BrandDetailClient({ brandId }: { brandId: string }) {
           {brand.datasets.length === 0 ? (
             <p className={styles.muted}>Henüz veri seti bağlı değil.</p>
           ) : (
-            brand.datasets.map((dataset) => (
+            visibleDatasets.map((dataset) => (
               <div className={styles.dataset} key={dataset.id}>
                 <div>
                   <strong>{dataset.name}</strong>
@@ -519,6 +535,48 @@ export function BrandDetailClient({ brandId }: { brandId: string }) {
                 )}
               </div>
             ))
+          )}
+
+          {brand.datasets.length > 0 && (
+            <nav
+              aria-label="Veri seti sayfaları"
+              style={{
+                marginTop: 18,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 12,
+                flexWrap: "wrap",
+              }}
+            >
+              <button
+                className={styles.secondary}
+                type="button"
+                disabled={safeDatasetPage === 1}
+                onClick={() =>
+                  setDatasetPage((value) => Math.max(1, value - 1))
+                }
+              >
+                Önceki sayfa
+              </button>
+
+              <span className={styles.muted}>
+                {safeDatasetPage} / {datasetPages}
+              </span>
+
+              <button
+                className={styles.secondary}
+                type="button"
+                disabled={safeDatasetPage === datasetPages}
+                onClick={() =>
+                  setDatasetPage((value) =>
+                    Math.min(datasetPages, value + 1),
+                  )
+                }
+              >
+                Sonraki sayfa
+              </button>
+            </nav>
           )}
         </section>
       </div>

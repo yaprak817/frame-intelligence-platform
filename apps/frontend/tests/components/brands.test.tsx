@@ -149,4 +149,45 @@ describe("brand detail", () => {
     await act(async () => finishSecond({ ok: true, json: async () => ({ id: "second", name: "Second", color: "#FFFFFF" }) } as Response));
     expect(screen.queryByText("Second")).not.toBeInTheDocument();
   });
+
+  it("paginates brand datasets twelve at a time", async () => {
+    const datasets = Array.from({ length: 13 }, (_, index) => ({
+      id: `dataset-${index + 1}`,
+      name: `Dataset ${index + 1}`,
+      job_id: null,
+      annotation_project_id: null,
+    }));
+
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...brand,
+        created_at: brand.updated_at,
+        classes: [],
+        datasets,
+      }),
+    } as Response);
+
+    const user = userEvent.setup();
+    render(<BrandDetailClient brandId={brand.id} />);
+
+    await screen.findByRole("heading", { name: brand.name });
+
+    const pagination = screen.getByRole("navigation", {
+      name: /Veri seti sayf/,
+    });
+
+    expect(pagination).toHaveTextContent("1 / 2");
+    expect(screen.getByText("Dataset 13")).toBeVisible();
+    expect(screen.queryByText("Dataset 1")).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Sonraki sayfa" }),
+    );
+
+    expect(pagination).toHaveTextContent("2 / 2");
+    expect(screen.getByText("Dataset 1")).toBeVisible();
+    expect(screen.queryByText("Dataset 13")).not.toBeInTheDocument();
+  });
+
 });
