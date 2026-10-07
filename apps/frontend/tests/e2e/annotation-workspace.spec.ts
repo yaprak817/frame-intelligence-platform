@@ -29,7 +29,12 @@ test("video result opens the gallery-first annotation workspace and persists a b
   await expect(page.getByRole("link", { name: /^1\.jpg/ })).toBeVisible();
   await expect(page.getByLabel("Bounding box çalışma alanı")).toHaveCount(0);
   await page.getByRole("link", { name: /^0\.jpg/ }).click();
-  await expect(page).toHaveURL(new RegExp(`/jobs/${jobId}/annotations/0$`));
+  await expect(page).toHaveURL(
+    new RegExp(`/jobs/${jobId}/annotations/0\\?returnTo=`),
+  );
+  expect(new URL(page.url()).searchParams.get("returnTo")).toBe(
+    `/jobs/${jobId}/annotations?page=1&filter=all&sort=asc`,
+  );
   const canvas = page.getByLabel("Bounding box çalışma alanı");
   await expect(canvas).toBeVisible();
   const bounds = await canvas.boundingBox();
