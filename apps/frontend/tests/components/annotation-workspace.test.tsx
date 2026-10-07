@@ -204,6 +204,25 @@ describe("annotation workspace", () => {
     expect(canvas.querySelectorAll("rect[data-box-id]:not([data-handle])")).toHaveLength(1);
   });
 
+  it("returns to the gallery page that opened the image", async () => {
+    const returnTo =
+      `/jobs/${jobId}/annotations?page=3&filter=all&sort=asc`;
+
+    render(
+      <AnnotationWorkspace
+        jobId={jobId}
+        initialImageIndex={4}
+        returnTo={returnTo}
+      />,
+    );
+
+    await screen.findByText("one.jpg");
+
+    expect(
+      screen.getByRole("link", { name: /Galeriye d\u00f6n/ }),
+    ).toHaveAttribute("href", returnTo);
+  });
+
   it("guards gallery navigation, beforeunload and browser back while dirty", async () => {
     vi.spyOn(window.history, "forward").mockImplementation(() => undefined);
     render(<AnnotationWorkspace jobId={jobId} />);
