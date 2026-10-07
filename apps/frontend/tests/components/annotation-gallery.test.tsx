@@ -61,7 +61,12 @@ describe("annotation gallery", () => {
     expect(screen.getAllByText("MANUEL ETİKETLENDİ")).toHaveLength(1);
     expect(screen.getAllByText("ETİKETLENMEDİ")).toHaveLength(11);
     const first = screen.getByRole("link", { name: /^0\.jpg/ });
-    expect(first).toHaveAttribute("href", `/jobs/${jobId}/annotations/0`);
+    expect(first).toHaveAttribute(
+      "href",
+      `/jobs/${jobId}/annotations/0?returnTo=${encodeURIComponent(
+        `/jobs/${jobId}/annotations?page=1&filter=all&sort=asc`,
+      )}`,
+    );
     expect(screen.getByRole("img", { name: "0.jpg" })).toHaveAttribute("loading", "lazy");
     expect(screen.getByText("1.250 sn")).toBeVisible();
     expect(screen.getAllByText("640×640").length).toBeGreaterThan(0);
@@ -77,12 +82,29 @@ describe("annotation gallery", () => {
     await user.click(screen.getByRole("button", { name: "Sonraki sayfa" }));
     expect(screen.getByText("2 / 2")).toBeVisible();
     expect(screen.getByRole("button", { name: "Sonraki sayfa" })).toBeDisabled();
+
+    const pageTwoCard = screen.getByRole("link", { name: /^12\.jpg/ });
+    expect(pageTwoCard).toHaveAttribute(
+      "href",
+      `/jobs/${jobId}/annotations/12?returnTo=${encodeURIComponent(
+        `/jobs/${jobId}/annotations?page=2&filter=all&sort=asc`,
+      )}`,
+    );
     await user.selectOptions(screen.getByLabelText("Durum"), "manual");
     expect(screen.getByText("1 / 1")).toBeVisible();
     expect(screen.getByText("MANUEL ETİKETLENDİ")).toBeVisible();
     await user.selectOptions(screen.getByLabelText("Durum"), "all");
     await user.selectOptions(screen.getByLabelText("Sıralama"), "desc");
-    expect(screen.getAllByRole("link").find((link) => link.classList.contains("annotation-card"))).toHaveAttribute("href", `/jobs/${jobId}/annotations/12`);
+    expect(
+      screen
+        .getAllByRole("link")
+        .find((link) => link.classList.contains("annotation-card")),
+    ).toHaveAttribute(
+      "href",
+      `/jobs/${jobId}/annotations/12?returnTo=${encodeURIComponent(
+        `/jobs/${jobId}/annotations?page=1&filter=all&sort=desc`,
+      )}`,
+    );
   });
 
 

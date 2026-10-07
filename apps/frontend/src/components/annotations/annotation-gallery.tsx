@@ -44,11 +44,32 @@ export const trainingPollRetryDelay = (error: unknown, failures: number) => {
   return Math.min(POLL_MAX_DELAY_MS, retryAfter);
 };
 
-export function AnnotationGallery({ jobId }: { jobId: string }) {
-  return <AnnotationGalleryContent key={jobId} jobId={jobId} />;
+export function AnnotationGallery({
+  jobId,
+  galleryPath,
+}: {
+  jobId: string;
+  galleryPath?: string;
+}) {
+  const resolvedGalleryPath =
+    galleryPath ?? `/jobs/${encodeURIComponent(jobId)}/annotations`;
+
+  return (
+    <AnnotationGalleryContent
+      key={`${jobId}:${resolvedGalleryPath}`}
+      jobId={jobId}
+      galleryPath={resolvedGalleryPath}
+    />
+  );
 }
 
-function AnnotationGalleryContent({ jobId }: { jobId: string }) {
+function AnnotationGalleryContent({
+  jobId,
+  galleryPath,
+}: {
+  jobId: string;
+  galleryPath: string;
+}) {
   const [project, setProject] = useState<AnnotationProject | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +111,27 @@ function AnnotationGalleryContent({ jobId }: { jobId: string }) {
   const jobRef = useRef(jobId);
   const trainingRef = useRef(training);
   const inferenceRef = useRef(inference);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedPage = Number(params.get("page"));
+    const requestedFilter = params.get("filter");
+    const requestedSort = params.get("sort");
+
+    if (Number.isSafeInteger(requestedPage) && requestedPage >= 1) {
+      setPage(requestedPage);
+    }
+    if (
+      requestedFilter === "all" ||
+      requestedFilter === "unlabelled" ||
+      requestedFilter === "manual"
+    ) {
+      setFilter(requestedFilter);
+    }
+    if (requestedSort === "asc" || requestedSort === "desc") {
+      setDescending(requestedSort === "desc");
+    }
+  }, [galleryPath]);
 
   useEffect(() => {
     jobRef.current = jobId;
@@ -411,6 +453,12 @@ function AnnotationGalleryContent({ jobId }: { jobId: string }) {
   const safePage = Math.min(page, pages);
   const visible = items.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
   const completed = project?.images.filter((item) => item.completed).length ?? 0;
+  const galleryReturnParams = new URLSearchParams({
+    page: String(safePage),
+    filter,
+    sort: descending ? "desc" : "asc",
+  });
+  const galleryReturnHref = `${galleryPath}?${galleryReturnParams.toString()}`;
 
   if (loading) {
     return (
@@ -582,7 +630,7 @@ function AnnotationGalleryContent({ jobId }: { jobId: string }) {
             <a
               className="annotation-card"
               key={item.index}
-              href={`/jobs/${encodeURIComponent(jobId)}/annotations/${item.index}`}
+              href={`/jobs/${encodeURIComponent(jobId)}/annotations/${item.index}?returnTo=${encodeURIComponent(galleryReturnHref)}`}
             >
               <img src={item.preview_url} alt={item.filename} loading="lazy" />
               <div>
