@@ -113,27 +113,6 @@ function AnnotationGalleryContent({
   const inferenceRef = useRef(inference);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const requestedPage = Number(params.get("page"));
-    const requestedFilter = params.get("filter");
-    const requestedSort = params.get("sort");
-
-    if (Number.isSafeInteger(requestedPage) && requestedPage >= 1) {
-      setPage(requestedPage);
-    }
-    if (
-      requestedFilter === "all" ||
-      requestedFilter === "unlabelled" ||
-      requestedFilter === "manual"
-    ) {
-      setFilter(requestedFilter);
-    }
-    if (requestedSort === "asc" || requestedSort === "desc") {
-      setDescending(requestedSort === "desc");
-    }
-  }, [galleryPath]);
-
-  useEffect(() => {
     jobRef.current = jobId;
   }, [jobId]);
   useEffect(() => {
