@@ -25,7 +25,15 @@ const colorFor = (classes: AnnotationClass[], id: string) => classes.find((item)
 const editableTarget = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
 const aborted = (value: unknown) => value instanceof DOMException && value.name === "AbortError";
 
-export function AnnotationWorkspace({ jobId, initialImageIndex }: { jobId: string; initialImageIndex?: number }) {
+export function AnnotationWorkspace({
+  jobId,
+  initialImageIndex,
+  returnTo,
+}: {
+  jobId: string;
+  initialImageIndex?: number;
+  returnTo?: string;
+}) {
   const [project, setProject] = useState<AnnotationProject | null>(null);
   const [position, setPosition] = useState(0);
   const [boxes, setBoxes] = useState<Rect[]>([]);
@@ -210,7 +218,8 @@ export function AnnotationWorkspace({ jobId, initialImageIndex }: { jobId: strin
   if (loading) return <main className="page-shell annotation-shell"><div className="status-message" role="status">Etiketleme projesi hazırlanıyor…</div></main>;
   if (!project) return <main className="page-shell annotation-shell"><div className="alert error" role="alert">{error ?? "Etiketleme projesi yüklenemedi."}</div><button className="button secondary" onClick={() => void loadProject()}>Yeniden dene</button></main>;
   const resultHref = `/jobs/${encodeURIComponent(jobId)}/result`;
-  const galleryHref = `/jobs/${encodeURIComponent(jobId)}/annotations`;
+  const galleryHref =
+    returnTo ?? `/jobs/${encodeURIComponent(jobId)}/annotations`;
   const guardExit = (event: React.MouseEvent<HTMLAnchorElement>) => { if (dirtyRef.current && !window.confirm("Kaydedilmemiş değişiklikler kaybolacak. Sayfadan ayrılmak istiyor musunuz?")) event.preventDefault(); };
   if (project.images.length === 0) return <main className="page-shell annotation-shell"><a className="back-link" href={resultHref}>← Sonuca dön</a><h1>Etiketlenecek görsel yok</h1><p>Bu sonuçta güvenli önizlemesi bulunan görsel yok.</p></main>;
   const image = project.images[position], previewKey = `${image.index}:${image.preview_url}:${previewGeneration}`, imageReady = readyPreview === previewKey;

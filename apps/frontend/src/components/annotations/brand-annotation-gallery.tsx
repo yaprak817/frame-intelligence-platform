@@ -102,5 +102,10 @@ export function BrandAnnotationGallery({ brandId }: { brandId: string }) {
     );
   }
 
-  return <AnnotationGallery jobId={jobId} />;
+  return (
+    <AnnotationGallery
+      jobId={jobId}
+      galleryPath={`/brands/${encodeURIComponent(brandId)}/annotations`}
+    />
+  );
 }
