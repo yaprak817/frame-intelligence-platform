@@ -52,9 +52,20 @@ function AnnotationGalleryContent({ jobId }: { jobId: string }) {
   const [project, setProject] = useState<AnnotationProject | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
-  const [descending, setDescending] = useState(false);
-  const [page, setPage] = useState(1);
+  const [filter, setFilter] = useState<Filter>(() => {
+    if (typeof window === "undefined") return "all";
+    const value = new URLSearchParams(window.location.search).get("filter");
+    return value === "unlabelled" || value === "manual" ? value : "all";
+  });
+  const [descending, setDescending] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("sort") === "desc";
+  });
+  const [page, setPage] = useState(() => {
+    if (typeof window === "undefined") return 1;
+    const value = Number(new URLSearchParams(window.location.search).get("page"));
+    return Number.isSafeInteger(value) && value >= 1 ? value : 1;
+  });
   const [training, setTraining] = useState<AnnotationTraining | null>(null);
   const [modelReady, setModelReady] = useState(false);
   const [modelReadyJob, setModelReadyJob] = useState<string | null>(null);
