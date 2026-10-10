@@ -45,7 +45,6 @@ def box(index: int, class_id=None) -> AnnotationBox:
     )
 
 
-
 def test_training_uses_original_coordinates_for_letterboxed_dataset_box() -> None:
     item = box(0)
     item.x_center = Decimal("0.80187502")
