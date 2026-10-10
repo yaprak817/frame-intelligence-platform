@@ -177,6 +177,7 @@ export function AnnotationWorkspace({
       if (active.kind === "draw" && (width < MIN_BOX || height < MIN_BOX)) return [];
       return [{ ...box, width: Math.max(MIN_BOX, width), height: Math.max(MIN_BOX, height), left: clamp(box.left, 0, 1 - Math.max(MIN_BOX, width)), top: clamp(box.top, 0, 1 - Math.max(MIN_BOX, height)) }];
     }));
+    if (active.kind === "draw") setSelected(active.id);
   };
   const pointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
     if (event.button !== 0 || imageLoading || busyRef.current || conflictRef.current || !readyPreview?.endsWith(`:${previewGeneration}`)) return;
@@ -184,7 +185,7 @@ export function AnnotationWorkspace({
     if (id) { const original = boxes.find((item) => item.id === id); if (!original) return; setSelected(id); gesture.current = { kind: corner ? "resize" : "move", corner, id, pointerId: event.pointerId, startX: location.x, startY: location.y, original }; }
     else {
       if (!activeClass || !project || boxes.length >= project.limits.max_boxes_per_image) { setError(activeClass ? "Bu görsel için kutu sınırına ulaşıldı." : "Kutu çizmeden önce aktif bir sınıf seçin."); return; }
-      const fresh: Rect = { id: crypto.randomUUID(), class_id: activeClass, left: location.x, top: location.y, width: 0, height: 0 }; setBoxes((current) => [...current, fresh]); setSelected(fresh.id); gesture.current = { kind: "draw", id: fresh.id, pointerId: event.pointerId, startX: location.x, startY: location.y, original: fresh };
+      const fresh: Rect = { id: crypto.randomUUID(), class_id: activeClass, left: location.x, top: location.y, width: 0, height: 0 }; setBoxes((current) => [...current, fresh]); gesture.current = { kind: "draw", id: fresh.id, pointerId: event.pointerId, startX: location.x, startY: location.y, original: fresh };
     }
     event.currentTarget.setPointerCapture?.(event.pointerId); event.preventDefault();
   };

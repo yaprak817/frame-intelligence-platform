@@ -270,9 +270,7 @@ class AnnotationTrainingService:
         )
         yolo_by_class = {item.id: item.yolo_index for item in classes}
         snapshot_box_coordinates = {
-            item.id: self._training_box_coordinates(
-                item, metadata[item.image_index][8]
-            )
+            item.id: self._training_box_coordinates(item, metadata[item.image_index][8])
             for item in boxes
         }
         try:
@@ -734,12 +732,8 @@ class AnnotationTrainingService:
         if content_width <= 0 or content_height <= 0:
             raise AnnotationTrainingSourceChanged
 
-        x_center = (
-            box.x_center * output_width - padding_left
-        ) / content_width
-        y_center = (
-            box.y_center * output_height - padding_top
-        ) / content_height
+        x_center = (box.x_center * output_width - padding_left) / content_width
+        y_center = (box.y_center * output_height - padding_top) / content_height
         width = box.width * output_width / content_width
         height = box.height * output_height / content_height
 

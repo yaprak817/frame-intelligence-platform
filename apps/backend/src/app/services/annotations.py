@@ -682,9 +682,7 @@ class AnnotationService:
         image.updated_at = now
         stored_boxes: list[AnnotationBox] = []
         for box in request.boxes:
-            x_center, y_center, width, height = self._box_to_storage(
-                box, source_image
-            )
+            x_center, y_center, width, height = self._box_to_storage(box, source_image)
             stored_boxes.append(
                 AnnotationBox(
                     id=box.id,

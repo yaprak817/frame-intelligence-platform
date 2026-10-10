@@ -798,7 +798,7 @@ async function main() {
     if (result.firstFrame.width !== 1138 || result.firstFrame.height !== 640 || Math.abs(result.firstFrame.width / result.firstFrame.height - 16 / 9) > 1 / result.firstFrame.height) throw new Error(`Production frame ölçüsü/oranı geçersiz: ${result.firstFrame.width}x${result.firstFrame.height}.`);
     const videoAnnotation = await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, result.jobId, result.firstFrame.width, result.firstFrame.height);
     const datasetSingle = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [imagePaths[0]], false, temporaryDirectory, true);
-    await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, datasetSingle.jobId, 640, 640);
+    await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, datasetSingle.jobId, 320, 180);
     const datasetMultiple = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, imagePaths, false, temporaryDirectory);
     const datasetZip = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [archivePath], true, temporaryDirectory);
     const trainingArchivePath = join(temporaryDirectory, "training-images.zip");

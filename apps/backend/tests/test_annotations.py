@@ -63,7 +63,6 @@ def test_box_coordinates_are_finite_positive_and_contained(field, value) -> None
         )
 
 
-
 def test_dataset_box_coordinates_round_trip_from_letterbox_to_original() -> None:
     source = SimpleNamespace(
         output_width=640,
@@ -82,13 +81,9 @@ def test_dataset_box_coordinates_round_trip_from_letterbox_to_original() -> None
     response = AnnotationService._box_response(stored, source)
 
     assert response.x_center == Decimal("0.80187502")
-    assert response.y_center == Decimal(
-        "0.1320833777777777777777777778"
-    )
+    assert response.y_center == Decimal("0.1320833777777777777777777778")
     assert response.width == Decimal("0.11750011")
-    assert response.height == Decimal(
-        "0.06000001777777777777777777778"
-    )
+    assert response.height == Decimal("0.06000001777777777777777777778")
 
     restored = AnnotationService._box_to_storage(response, source)
 
