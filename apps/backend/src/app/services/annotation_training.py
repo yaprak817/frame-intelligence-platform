@@ -269,6 +269,12 @@ class AnnotationTrainingService:
             model_version=None,
         )
         yolo_by_class = {item.id: item.yolo_index for item in classes}
+        snapshot_box_coordinates = {
+            item.id: self._training_box_coordinates(
+                item, metadata[item.image_index][8]
+            )
+            for item in boxes
+        }
         try:
             self.session.add(run)
             await self.session.flush()
@@ -313,10 +319,10 @@ class AnnotationTrainingService:
                         box_id=item.id,
                         image_index=item.image_index,
                         yolo_index=yolo_by_class[item.class_id],
-                        x_center=item.x_center,
-                        y_center=item.y_center,
-                        width=item.width,
-                        height=item.height,
+                        x_center=snapshot_box_coordinates[item.id][0],
+                        y_center=snapshot_box_coordinates[item.id][1],
+                        width=snapshot_box_coordinates[item.id][2],
+                        height=snapshot_box_coordinates[item.id][3],
                     )
                     for item in boxes
                 ]
@@ -676,16 +682,24 @@ class AnnotationTrainingService:
             return {
                 item.index: (
                     item.filename,
-                    item.yolo_object_key,
-                    item.yolo_size_bytes,
-                    "image/jpeg",
-                    item.yolo_sha256,
-                    item.output_width,
-                    item.output_height,
+                    item.object_key,
+                    item.size_bytes,
+                    item.content_type,
+                    item.sha256,
+                    item.width,
+                    item.height,
                     None,
+                    (
+                        item.output_width,
+                        item.output_height,
+                        item.padding.left,
+                        item.padding.top,
+                        item.padding.right,
+                        item.padding.bottom,
+                    ),
                 )
                 for item in manifest.images
-                if item.yolo_object_key is not None
+                if item.object_key is not None
             }
         return {
             item.index: (
@@ -697,9 +711,49 @@ class AnnotationTrainingService:
                 item.width,
                 item.height,
                 item.timestamp_ms,
+                None,
             )
             for item in manifest.frames
         }
+
+    @staticmethod
+    def _training_box_coordinates(box: AnnotationBox, geometry):
+        if geometry is None:
+            return box.x_center, box.y_center, box.width, box.height
+
+        (
+            output_width,
+            output_height,
+            padding_left,
+            padding_top,
+            padding_right,
+            padding_bottom,
+        ) = geometry
+        content_width = output_width - padding_left - padding_right
+        content_height = output_height - padding_top - padding_bottom
+        if content_width <= 0 or content_height <= 0:
+            raise AnnotationTrainingSourceChanged
+
+        x_center = (
+            box.x_center * output_width - padding_left
+        ) / content_width
+        y_center = (
+            box.y_center * output_height - padding_top
+        ) / content_height
+        width = box.width * output_width / content_width
+        height = box.height * output_height / content_height
+
+        if (
+            width <= 0
+            or height <= 0
+            or x_center - width / 2 < 0
+            or x_center + width / 2 > 1
+            or y_center - height / 2 < 0
+            or y_center + height / 2 > 1
+        ):
+            raise AnnotationTrainingInvalidDataset
+
+        return x_center, y_center, width, height
 
     @staticmethod
     def response(

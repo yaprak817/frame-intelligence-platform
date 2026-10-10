@@ -547,13 +547,21 @@ function AnnotationGalleryContent({
           <div role="status" aria-label="Otomatik etiketleme durumu">
             <strong>
               {inference.status === "SUCCEEDED"
-                ? "Otomatik etiketleme tamamlandı"
+                ? "Son otomatik etiketleme tamamlandı"
                 : inference.status}
             </strong>
             <p>
-              {inference.processed_image_count} / {inference.target_image_count} görsel
-              işlendi · {inference.created_box_count} kutu üretildi
+              Bu çalıştırmada {inference.processed_image_count} /{" "}
+              {inference.target_image_count} görsel işlendi ·{" "}
+              {inference.created_box_count} yeni kutu üretildi
             </p>
+            {inference.status === "SUCCEEDED" && (
+              <p className="hint">
+                Galerideki “görsel etiketli” sayısı; manuel etiketleri ve
+                önceki otomatik etiketlemelerde oluşturulan mevcut kutuları birlikte
+                gösterir.
+              </p>
+            )}
             {inference.status === "FAILED" && (
               <p>Otomatik etiketleme tamamlanamadı. Yeniden deneyebilirsiniz.</p>
             )}

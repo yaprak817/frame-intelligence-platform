@@ -45,6 +45,27 @@ def box(index: int, class_id=None) -> AnnotationBox:
     )
 
 
+
+def test_training_uses_original_coordinates_for_letterboxed_dataset_box() -> None:
+    item = box(0)
+    item.x_center = Decimal("0.80187502")
+    item.y_center = Decimal("0.29304690")
+    item.width = Decimal("0.11750011")
+    item.height = Decimal("0.03375001")
+
+    converted = AnnotationTrainingService._training_box_coordinates(
+        item,
+        (640, 640, 0, 140, 0, 140),
+    )
+
+    assert converted == (
+        Decimal("0.80187502"),
+        Decimal("0.1320833777777777777777777778"),
+        Decimal("0.11750011"),
+        Decimal("0.06000001777777777777777777778"),
+    )
+
+
 def test_training_request_is_strict_and_bounded() -> None:
     assert (
         CreateAnnotationTrainingRequest(expected_revision=2).config.max_snapshot_images

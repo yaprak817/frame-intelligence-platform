@@ -343,22 +343,18 @@ class AnnotationInferenceService:
         if isinstance(manifest, StoredDatasetManifestV1):
             return {
                 image.index: (
-                    image.yolo_object_key,
-                    image.yolo_size_bytes,
-                    "image/jpeg",
+                    image.object_key,
+                    image.size_bytes,
+                    image.content_type,
                     image.filename,
-                    image.yolo_sha256,
-                    image.output_width,
-                    image.output_height,
-                    True,
+                    image.sha256,
+                    image.width,
+                    image.height,
+                    False,
                 )
                 for image in manifest.images
                 if image.quality_category in {"normal", "challenging"}
-                and image.yolo_object_key is not None
-                and image.yolo_size_bytes is not None
-                and image.yolo_sha256 is not None
-                and image.output_width == 640
-                and image.output_height == 640
+                and image.object_key is not None
             }
         return {
             frame.index: (
