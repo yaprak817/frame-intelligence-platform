@@ -45,9 +45,7 @@ def document(
 ) -> bytes:
     source_payload = yolo_payload if source_payload is None else source_payload
     padding = (
-        {"top": 0, "right": 0, "bottom": 0, "left": 0}
-        if padding is None
-        else padding
+        {"top": 0, "right": 0, "bottom": 0, "left": 0} if padding is None else padding
     )
     source_digest = hashlib.sha256(source_payload).hexdigest()
     yolo_digest = hashlib.sha256(yolo_payload).hexdigest()
@@ -116,6 +114,7 @@ def document(
         },
     }
     return json.dumps(value).encode()
+
 
 def encoded_image(image_format: str, size: tuple[int, int]) -> bytes:
     output = BytesIO()
