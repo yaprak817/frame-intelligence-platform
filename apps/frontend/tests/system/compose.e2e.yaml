@@ -18,6 +18,10 @@ services:
     container_name: !reset null
     restart: "no"
 
+  ml-worker:
+    container_name: !reset null
+    restart: "no"
+
   postgres:
     container_name: !reset null
     ports: !reset []
