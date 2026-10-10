@@ -239,7 +239,18 @@ class ResultArtifactService:
         if manifest.run_token != run_token:
             raise ResultUnavailableError
         if isinstance(manifest, StoredDatasetManifestV1):
-            return await self.dataset_yolo_preview(job_id, run_token, image_index)
+            if image_index < 0 or image_index >= len(manifest.images):
+                raise ArtifactNotFoundError
+            image = manifest.images[image_index]
+            if image.index != image_index or image.object_key is None:
+                raise ArtifactNotFoundError
+            return await self._verified_stream(
+                image.object_key,
+                image.size_bytes,
+                image.sha256,
+                image.content_type,
+                self._dataset_image_max_bytes,
+            )
         if image_index < 0 or image_index >= len(manifest.frames):
             raise ArtifactNotFoundError
         frame = manifest.frames[image_index]

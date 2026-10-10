@@ -32,8 +32,25 @@ class Repository:
         return self.job if job_id == self.job.id else None
 
 
-def document(job_id, run_token, payload: bytes, yolo_key: str) -> bytes:
-    digest = hashlib.sha256(payload).hexdigest()
+def document(
+    job_id,
+    run_token,
+    yolo_payload: bytes,
+    yolo_key: str,
+    *,
+    source_payload: bytes | None = None,
+    source_size: tuple[int, int] = (640, 640),
+    resize_scale: float = 1.0,
+    padding: dict[str, int] | None = None,
+) -> bytes:
+    source_payload = yolo_payload if source_payload is None else source_payload
+    padding = (
+        {"top": 0, "right": 0, "bottom": 0, "left": 0}
+        if padding is None
+        else padding
+    )
+    source_digest = hashlib.sha256(source_payload).hexdigest()
+    yolo_digest = hashlib.sha256(yolo_payload).hexdigest()
     prefix = f"jobs/{job_id}/results/{run_token}"
     value = {
         "schema_version": 1,
@@ -63,10 +80,10 @@ def document(job_id, run_token, payload: bytes, yolo_key: str) -> bytes:
                 "index": 0,
                 "filename": "image_000001.jpg",
                 "content_type": "image/jpeg",
-                "size_bytes": len(payload),
-                "sha256": digest,
-                "width": 640,
-                "height": 640,
+                "size_bytes": len(source_payload),
+                "sha256": source_digest,
+                "width": source_size[0],
+                "height": source_size[1],
                 "quality_category": "normal",
                 "sharpness": 10.0,
                 "brightness": 100.0,
@@ -77,12 +94,12 @@ def document(job_id, run_token, payload: bytes, yolo_key: str) -> bytes:
                 "duplicate": False,
                 "object_key": f"{prefix}/images/image_000001.jpg",
                 "yolo_object_key": yolo_key,
-                "yolo_size_bytes": len(payload),
-                "yolo_sha256": digest,
+                "yolo_size_bytes": len(yolo_payload),
+                "yolo_sha256": yolo_digest,
                 "output_width": 640,
                 "output_height": 640,
-                "resize_scale": 1.0,
-                "padding": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+                "resize_scale": resize_scale,
+                "padding": padding,
             }
         ],
         "exports": {
@@ -99,7 +116,6 @@ def document(job_id, run_token, payload: bytes, yolo_key: str) -> bytes:
         },
     }
     return json.dumps(value).encode()
-
 
 def encoded_image(image_format: str, size: tuple[int, int]) -> bytes:
     output = BytesIO()
@@ -125,14 +141,32 @@ async def exercise_preview() -> None:
     job_id, run_token = uuid4(), uuid4()
     prefix = f"jobs/{job_id}/results/{run_token}"
     manifest_key = f"{prefix}/manifest.json"
+    source_key = f"{prefix}/images/image_000001.jpg"
     yolo_key = f"{prefix}/yolo/image_000001.jpg"
+    source_payload = encoded_image("JPEG", (1280, 720))
     payload = encoded_image("JPEG", (640, 640))
-    manifest = document(job_id, run_token, payload, yolo_key)
+    manifest = document(
+        job_id,
+        run_token,
+        payload,
+        yolo_key,
+        source_payload=source_payload,
+        source_size=(1280, 720),
+        resize_scale=0.5,
+        padding={"top": 140, "right": 0, "bottom": 140, "left": 0},
+    )
     client.put_object(
         Bucket=bucket,
         Key=manifest_key,
         Body=manifest,
         ContentType="application/json",
+    )
+    client.put_object(
+        Bucket=bucket,
+        Key=source_key,
+        Body=source_payload,
+        ContentType="image/jpeg",
+        Metadata={"sha256": hashlib.sha256(source_payload).hexdigest()},
     )
     client.put_object(
         Bucket=bucket,
@@ -206,6 +240,14 @@ async def exercise_preview() -> None:
                 spool_min_free_bytes=0,
                 spool_root=spool_root,
             )
+            stream = await service.annotation_preview(job_id, run_token, 0)
+            spool_path = stream.body._path
+            assert os.path.exists(spool_path)
+            received = b"".join([chunk async for chunk in stream.chunks()])
+            assert received == source_payload
+            assert received != payload
+            assert opened[-1].closed and not os.path.exists(spool_path)
+
             stream = await service.dataset_yolo_preview(job_id, run_token, 0)
             spool_path = stream.body._path
             assert os.path.exists(spool_path)

@@ -1,5 +1,6 @@
 import unicodedata
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select, update
@@ -26,7 +27,7 @@ from app.schemas.annotations import (
     PutImageAnnotationsRequest,
     UpdateAnnotationClassRequest,
 )
-from app.schemas.artifacts import StoredDatasetManifestV1
+from app.schemas.artifacts import StoredDatasetImageV1, StoredDatasetManifestV1
 from app.services.result_artifacts import (
     FailedResultUnavailableError,
     ResultArtifactService,
@@ -404,7 +405,7 @@ class AnnotationService:
                 raise AnnotationSourceChanged
             metadata = (
                 {
-                    image.index: (image.output_width, image.output_height, None)
+                    image.index: (image.width, image.height, None)
                     for image in manifest.images
                     if image.quality_category in {"normal", "challenging"}
                     and image.object_key is not None
@@ -460,8 +461,8 @@ class AnnotationService:
                     if source_item is None:
                         raise AnnotationSourceChanged
                     metadata[image.image_index] = (
-                        source_item.output_width,
-                        source_item.output_height,
+                        source_item.width,
+                        source_item.height,
                         None,
                     )
                 else:
@@ -605,6 +606,7 @@ class AnnotationService:
         image = await self.session.get(AnnotationImage, (project.id, image_index))
         if image is None:
             raise AnnotationImageNotFound
+        source_image = await self._source_dataset_image(project, image)
         boxes = list(
             (
                 await self.session.scalars(
@@ -621,7 +623,7 @@ class AnnotationService:
             project_revision=project.revision,
             image_index=image_index,
             completed=image.completed,
-            boxes=[self._box_response(box) for box in boxes],
+            boxes=[self._box_response(box, source_image) for box in boxes],
         )
 
     async def put_image(
@@ -633,6 +635,7 @@ class AnnotationService:
         image = await self.session.get(AnnotationImage, (project.id, image_index))
         if image is None:
             raise AnnotationImageNotFound
+        source_image = await self._source_dataset_image(project, image)
         if len(request.boxes) > self.max_boxes_per_image:
             raise AnnotationLimitExceeded
         class_ids = set(
@@ -677,29 +680,67 @@ class AnnotationService:
         now = datetime.now(UTC)
         image.completed = request.completed
         image.updated_at = now
-        self.session.add_all(
-            [
+        stored_boxes: list[AnnotationBox] = []
+        for box in request.boxes:
+            x_center, y_center, width, height = self._box_to_storage(
+                box, source_image
+            )
+            stored_boxes.append(
                 AnnotationBox(
                     id=box.id,
                     project_id=project.id,
                     image_index=image_index,
                     class_id=box.class_id,
-                    x_center=box.x_center,
-                    y_center=box.y_center,
-                    width=box.width,
-                    height=box.height,
+                    x_center=x_center,
+                    y_center=y_center,
+                    width=width,
+                    height=height,
                     created_at=now,
                     updated_at=now,
                 )
-                for box in request.boxes
-            ]
-        )
+            )
+        self.session.add_all(stored_boxes)
         try:
             await self.session.commit()
         except IntegrityError as error:
             await self.session.rollback()
             raise AnnotationClassInvalid from error
         return await self.image(project, image_index)
+
+    async def _source_dataset_image(
+        self, project: AnnotationProject, image: AnnotationImage
+    ) -> StoredDatasetImageV1 | None:
+        source_job_id = image.source_job_id or project.job_id
+        source_run_token = image.source_result_run_token or project.result_run_token
+        source_image_index = (
+            image.source_image_index
+            if image.source_image_index is not None
+            else image.image_index
+        )
+        _job, manifest = await self.results.annotation_source(source_job_id)
+        if manifest.run_token != source_run_token:
+            raise AnnotationSourceChanged
+        if not isinstance(manifest, StoredDatasetManifestV1):
+            return None
+
+        source = next(
+            (
+                item
+                for item in manifest.images
+                if item.index == source_image_index
+                and item.quality_category in {"normal", "challenging"}
+                and item.object_key is not None
+                and item.yolo_object_key is not None
+                and item.output_width == 640
+                and item.output_height == 640
+                and item.sha256 == image.image_sha256
+                and item.yolo_sha256 == image.yolo_sha256
+            ),
+            None,
+        )
+        if source is None:
+            raise AnnotationSourceChanged
+        return source
 
     async def preview(
         self, project: AnnotationProject, image_index: int
@@ -795,12 +836,79 @@ class AnnotationService:
         )
 
     @staticmethod
-    def _box_response(box: AnnotationBox) -> AnnotationBoxResponse:
+    def _dataset_geometry(
+        source: StoredDatasetImageV1,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal, Decimal]:
+        output_width = Decimal(source.output_width)
+        output_height = Decimal(source.output_height)
+        padding_left = Decimal(source.padding.left)
+        padding_top = Decimal(source.padding.top)
+        content_width = output_width - padding_left - Decimal(source.padding.right)
+        content_height = output_height - padding_top - Decimal(source.padding.bottom)
+        if content_width <= 0 or content_height <= 0:
+            raise AnnotationSourceChanged
+        return (
+            output_width,
+            output_height,
+            padding_left,
+            padding_top,
+            content_width,
+            content_height,
+        )
+
+    @classmethod
+    def _box_response(
+        cls,
+        box: AnnotationBox,
+        source: StoredDatasetImageV1 | None = None,
+    ) -> AnnotationBoxResponse:
+        if source is None:
+            return AnnotationBoxResponse(
+                id=box.id,
+                class_id=box.class_id,
+                x_center=box.x_center,
+                y_center=box.y_center,
+                width=box.width,
+                height=box.height,
+            )
+
+        (
+            output_width,
+            output_height,
+            padding_left,
+            padding_top,
+            content_width,
+            content_height,
+        ) = cls._dataset_geometry(source)
         return AnnotationBoxResponse(
             id=box.id,
             class_id=box.class_id,
-            x_center=box.x_center,
-            y_center=box.y_center,
-            width=box.width,
-            height=box.height,
+            x_center=(box.x_center * output_width - padding_left) / content_width,
+            y_center=(box.y_center * output_height - padding_top) / content_height,
+            width=box.width * output_width / content_width,
+            height=box.height * output_height / content_height,
+        )
+
+    @classmethod
+    def _box_to_storage(
+        cls,
+        box,
+        source: StoredDatasetImageV1 | None,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+        if source is None:
+            return box.x_center, box.y_center, box.width, box.height
+
+        (
+            output_width,
+            output_height,
+            padding_left,
+            padding_top,
+            content_width,
+            content_height,
+        ) = cls._dataset_geometry(source)
+        return (
+            (box.x_center * content_width + padding_left) / output_width,
+            (box.y_center * content_height + padding_top) / output_height,
+            box.width * content_width / output_width,
+            box.height * content_height / output_height,
         )

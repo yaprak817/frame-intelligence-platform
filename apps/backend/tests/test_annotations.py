@@ -63,6 +63,43 @@ def test_box_coordinates_are_finite_positive_and_contained(field, value) -> None
         )
 
 
+
+def test_dataset_box_coordinates_round_trip_from_letterbox_to_original() -> None:
+    source = SimpleNamespace(
+        output_width=640,
+        output_height=640,
+        padding=SimpleNamespace(top=140, right=0, bottom=140, left=0),
+    )
+    stored = SimpleNamespace(
+        id=uuid4(),
+        class_id=uuid4(),
+        x_center=Decimal("0.80187502"),
+        y_center=Decimal("0.29304690"),
+        width=Decimal("0.11750011"),
+        height=Decimal("0.03375001"),
+    )
+
+    response = AnnotationService._box_response(stored, source)
+
+    assert response.x_center == Decimal("0.80187502")
+    assert response.y_center == Decimal(
+        "0.1320833777777777777777777778"
+    )
+    assert response.width == Decimal("0.11750011")
+    assert response.height == Decimal(
+        "0.06000001777777777777777777778"
+    )
+
+    restored = AnnotationService._box_to_storage(response, source)
+
+    assert restored == (
+        stored.x_center,
+        stored.y_center,
+        stored.width,
+        stored.height,
+    )
+
+
 def test_duplicate_box_identifiers_and_extra_fields_are_rejected() -> None:
     identifier = uuid4()
     box = {
