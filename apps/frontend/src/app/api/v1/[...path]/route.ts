@@ -6,13 +6,14 @@ import { isIP } from "node:net";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const REQUEST_HEADERS = ["accept", "content-type", "content-length", "idempotency-key"] as const;
+const REQUEST_HEADERS = ["accept", "content-type", "content-length", "idempotency-key", "cookie"] as const;
 const RESPONSE_HEADERS = [
   "content-type",
   "cache-control",
   "pragma",
   "content-disposition",
   "retry-after",
+  "set-cookie",
 ] as const;
 const API_TIMEOUT_DEFAULT_SECONDS = 30;
 const UPLOAD_TIMEOUT_DEFAULT_SECONDS = 1_800;
