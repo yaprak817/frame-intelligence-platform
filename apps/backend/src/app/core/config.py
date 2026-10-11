@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     rate_limit_annotation_snapshot_requests: int = 5
     annotation_training_max_snapshots_per_project: int = 5
     annotation_max_payload_bytes: int = 256 * 1024
+    auth_session_ttl_seconds: int = 7 * 24 * 60 * 60
     rate_limit_window_seconds: int = 60
     dependency_timeout_seconds: float = 2.0
     outbox_poll_interval_seconds: float = 1.0
