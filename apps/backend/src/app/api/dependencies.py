@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -10,12 +11,20 @@ from app.security.source_secrets import SourceSecretCipher
 from app.services.annotation_inference import AnnotationInferenceService
 from app.services.annotation_training import AnnotationTrainingService
 from app.services.annotations import AnnotationService
+from app.services.auth import AuthService
 from app.services.frame_exports import FrameExportService
 from app.services.job_service import JobService
 from app.services.result_artifacts import ResultArtifactService
 from app.storage.s3 import S3MultipartUploader, S3ResultObjectStorage
 
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
+
+
+def get_auth_service(session: SessionDependency) -> AuthService:
+    return AuthService(
+        session,
+        timedelta(seconds=settings.auth_session_ttl_seconds),
+    )
 
 
 def get_job_service(session: SessionDependency) -> JobService:
