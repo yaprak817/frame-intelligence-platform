@@ -113,6 +113,29 @@ export function requestHeaders(request: NextRequest): Headers {
   return headers;
 }
 
+
+function browserMutationIsSameOrigin(request: NextRequest): boolean {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return true;
+
+  const origin = request.headers.get("origin");
+  if (origin) {
+    try {
+      return new URL(origin).origin === request.nextUrl.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  const referer = request.headers.get("referer");
+  if (!referer) return true;
+
+  try {
+    return new URL(referer).origin === request.nextUrl.origin;
+  } catch {
+    return false;
+  }
+}
+
 function safeRelativeLocation(value: string | null, request: NextRequest): string | null {
   if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return null;
   try {
@@ -171,6 +194,14 @@ function streamedBody(
 async function forward(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const backend = trustedBackendOrigin();
   const { path } = await context.params;
+
+  if (!browserMutationIsSameOrigin(request)) {
+    return NextResponse.json(
+      { detail: "Cross-origin request rejected" },
+      { status: 403 },
+    );
+  }
+
   if (!backend) {
     return NextResponse.json({ detail: "Backend service is unavailable" }, { status: 503 });
   }

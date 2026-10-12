@@ -23,6 +23,11 @@ class InvalidCredentialsError(Exception):
     pass
 
 
+_DUMMY_PASSWORD_HASH = hash_password(
+    "frame-intelligence-auth-dummy-password-not-a-user-secret"
+)
+
+
 class AuthService:
     def __init__(self, session: AsyncSession, session_ttl: timedelta) -> None:
         self.session = session
@@ -58,11 +63,14 @@ class AuthService:
     async def login(self, email: str, password: str) -> tuple[User, str]:
         user = await self.session.scalar(select(User).where(User.email == email))
 
-        if (
-            user is None
-            or not user.is_active
-            or not verify_password(password, user.password_hash)
-        ):
+        password_hash = (
+            user.password_hash
+            if user is not None
+            else _DUMMY_PASSWORD_HASH
+        )
+        password_valid = verify_password(password, password_hash)
+
+        if user is None or not user.is_active or not password_valid:
             raise InvalidCredentialsError
 
         if password_needs_rehash(user.password_hash):

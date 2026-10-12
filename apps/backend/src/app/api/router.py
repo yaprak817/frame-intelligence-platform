@@ -1,5 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.dependencies import require_safe_origin
 from app.api.routes.annotations import router as annotations_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.brand_annotations import router as brand_annotations_router
@@ -7,7 +8,7 @@ from app.api.routes.brands import router as brands_router
 from app.api.routes.health import router as health_router
 from app.api.routes.jobs import router as jobs_router
 
-api_router = APIRouter()
+api_router = APIRouter(dependencies=[Depends(require_safe_origin)])
 
 api_router.include_router(
     auth_router,

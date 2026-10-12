@@ -19,6 +19,33 @@ describe("streaming API route proxy", () => {
     vi.unstubAllGlobals();
   });
 
+
+  it("rejects cross-origin browser mutations before forwarding", async () => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const request = new NextRequest(
+      "http://frontend/api/v1/auth/login",
+      {
+        method: "POST",
+        headers: {
+          Origin: "http://evil.example",
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      },
+    );
+
+    const response = await POST(
+      request,
+      context(["auth", "login"]),
+    );
+
+    expect(response.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
   it.each([["PUT", PUT], ["PATCH", PATCH], ["DELETE", DELETE]] as const)("forwards annotation %s mutations", async (method, handler) => {
     process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
     const upstream = vi.fn().mockResolvedValue(new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }));

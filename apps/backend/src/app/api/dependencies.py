@@ -1,5 +1,6 @@
 from datetime import timedelta
 from typing import Annotated
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import Cookie, Depends, HTTPException, Request, status
@@ -103,6 +104,78 @@ def get_annotation_inference_service(
 
 
 SESSION_COOKIE_NAME = "frame_session"
+
+
+_SAFE_ORIGIN_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _canonical_origin(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return None
+
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+
+    default_port = (
+        (scheme == "http" and port == 80)
+        or (scheme == "https" and port == 443)
+    )
+
+    origin = f"{scheme}://{host}"
+    if port is not None and not default_port:
+        origin += f":{port}"
+    return origin
+
+
+def require_safe_origin(request: Request) -> None:
+    if request.method.upper() in _SAFE_ORIGIN_METHODS:
+        return
+
+    supplied = request.headers.get("origin")
+    if supplied is None:
+        supplied = request.headers.get("referer")
+
+    # Non-browser/API clients may legitimately omit both headers.
+    if supplied is None:
+        return
+
+    supplied_origin = _canonical_origin(supplied)
+    request_origin = _canonical_origin(str(request.base_url))
+
+    allowed_origins = {
+        origin
+        for origin in (request_origin,)
+        if origin is not None
+    }
+
+    settings = getattr(request.app.state, "settings", None)
+    if settings is not None:
+        for configured in settings.cors_allow_origins:
+            normalized = _canonical_origin(configured)
+            if normalized is not None:
+                allowed_origins.add(normalized)
+
+    if supplied_origin is None or supplied_origin not in allowed_origins:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "CROSS_ORIGIN_REQUEST_REJECTED",
+                "message": "Cross-origin request rejected",
+            },
+        )
 
 
 async def get_current_user(
