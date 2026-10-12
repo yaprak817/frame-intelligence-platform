@@ -1,5 +1,6 @@
 from datetime import timedelta
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Cookie, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import get_session
 from app.models.auth import User
+from app.models.processing_job import ProcessingJob
 from app.repositories.jobs import SQLAlchemyJobRepository
 from app.security.source_secrets import SourceSecretCipher
 from app.services.annotation_inference import AnnotationInferenceService
@@ -101,9 +103,6 @@ def get_annotation_inference_service(
     )
 
 
-async def authorize_result_access() -> None:
-    """Single-tenant authorization seam for future ownership enforcement."""
-
 SESSION_COOKIE_NAME = "frame_session"
 
 
@@ -131,3 +130,24 @@ async def get_current_user(
 
 
 CurrentUserDependency = Annotated[User, Depends(get_current_user)]
+
+async def authorize_result_access(
+    request: Request,
+    session: SessionDependency,
+    current_user: CurrentUserDependency,
+) -> None:
+    raw_job_id = request.path_params.get("job_id")
+    try:
+        job_id = UUID(str(raw_job_id))
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "JOB_NOT_FOUND", "message": "Job not found"},
+        ) from None
+
+    job = await session.get(ProcessingJob, job_id)
+    if job is None or job.owner_user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "JOB_NOT_FOUND", "message": "Job not found"},
+        )

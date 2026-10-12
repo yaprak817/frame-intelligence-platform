@@ -4,8 +4,9 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import authorize_result_access, get_current_user
 
 
 class FakeAuthService:
@@ -46,3 +47,53 @@ def test_current_user_returns_authenticated_user():
 
     assert result is user
     assert auth.calls == ["valid-token"]
+
+class OwnershipSession:
+    def __init__(self, job=None):
+        self.job = job
+
+    async def get(self, _model, identifier):
+        if self.job is not None and self.job.id == identifier:
+            return self.job
+        return None
+
+
+def ownership_request(job_id):
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/api/v1/jobs/{job_id}/result",
+            "headers": [],
+            "path_params": {"job_id": str(job_id)},
+        }
+    )
+
+
+def test_result_access_allows_job_owner():
+    user = SimpleNamespace(id=uuid4())
+    job = SimpleNamespace(id=uuid4(), owner_user_id=user.id)
+
+    asyncio.run(
+        authorize_result_access(
+            ownership_request(job.id),
+            OwnershipSession(job),
+            user,
+        )
+    )
+
+
+def test_result_access_hides_other_users_job():
+    user = SimpleNamespace(id=uuid4())
+    job = SimpleNamespace(id=uuid4(), owner_user_id=uuid4())
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            authorize_result_access(
+                ownership_request(job.id),
+                OwnershipSession(job),
+                user,
+            )
+        )
+
+    assert error.value.status_code == 404
