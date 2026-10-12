@@ -131,6 +131,7 @@ describe("streaming API route proxy", () => {
       accept: "application/json",
       "content-length": "5",
       "content-type": "video/mp4",
+      cookie: "session=secret",
       "idempotency-key": "web-request-1",
     });
     expect(init.body).toBe(request.body);
