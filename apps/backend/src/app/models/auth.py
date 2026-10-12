@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlalchemy import (
     CHAR,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -39,6 +40,7 @@ class UserSession(Base):
     __tablename__ = "user_sessions"
     __table_args__ = (
         UniqueConstraint("token_hash", name="uq_user_sessions_token_hash"),
+        CheckConstraint("expires_at > created_at", name="ck_user_sessions_expiry"),
         Index("ix_user_sessions_user", "user_id"),
         Index("ix_user_sessions_expires_at", "expires_at"),
     )

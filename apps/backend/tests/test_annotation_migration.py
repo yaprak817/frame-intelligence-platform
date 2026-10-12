@@ -40,6 +40,10 @@ def test_annotation_migration_is_the_single_head(tmp_path, monkeypatch) -> None:
     assert script.get_revision("20260920_0012").down_revision == "20260916_0011"
     assert script.get_revision("20261011_0013").down_revision == "20260920_0012"
     assert script.get_revision("20261012_0014").down_revision == "20261011_0013"
+    assert "ck_user_sessions_expiry" in {
+        constraint.name
+        for constraint in Base.metadata.tables["user_sessions"].constraints
+    }
     assert {
         "annotation_inference_runs",
         "annotation_inference_outbox",
