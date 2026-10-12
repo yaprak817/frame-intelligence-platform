@@ -44,7 +44,14 @@ class AuthService:
             await self.session.commit()
         except IntegrityError as exc:
             await self.session.rollback()
-            raise EmailAlreadyRegisteredError from exc
+            constraint_name = getattr(
+                getattr(exc.orig, "diag", None),
+                "constraint_name",
+                None,
+            )
+            if constraint_name == "uq_users_email":
+                raise EmailAlreadyRegisteredError from exc
+            raise
 
         return user
 
