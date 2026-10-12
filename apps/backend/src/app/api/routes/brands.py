@@ -11,6 +11,7 @@ from app.api.dependencies import CurrentUserDependency
 from app.db.session import get_session
 from app.models.annotations import AnnotationProject
 from app.models.brands import Brand, BrandClass, BrandDataset
+from app.models.processing_job import ProcessingJob
 from app.schemas.brands import (
     BrandClassCreate,
     BrandClassView,
@@ -255,6 +256,11 @@ async def attach_brand_dataset(
         if payload.job_id is not None and payload.job_id != project.job_id:
             raise HTTPException(status_code=409, detail="Veri seti kaynağı uyuşmuyor.")
         source_job_id = project.job_id
+
+    if source_job_id is not None:
+        source_job = await session.get(ProcessingJob, source_job_id)
+        if source_job is None or source_job.owner_user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="?? bulunamad?.")
 
     if source_job_id is not None:
         owner = await session.scalar(

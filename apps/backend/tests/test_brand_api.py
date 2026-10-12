@@ -20,6 +20,7 @@ from app.db.session import get_session
 from app.main import app
 from app.models.annotations import AnnotationProject
 from app.models.brands import Brand, BrandDataset
+from app.models.processing_job import ProcessingJob
 from app.schemas.brands import BrandClassCreate, BrandCreate, BrandDatasetAttach
 from app.services.annotation_training import (
     AnnotationTrainingService,
@@ -52,6 +53,8 @@ class Session:
     async def get(self, model, identifier):
         if model is Brand and self.brand and self.brand.id == identifier:
             return self.brand
+        if model is ProcessingJob:
+            return SimpleNamespace(id=identifier, owner_user_id=USER_ID)
         if (
             model is AnnotationProject
             and self.project
@@ -424,3 +427,35 @@ def test_brand_training_uses_each_attached_source_and_rejects_stale_run():
     images[1].source_result_run_token = uuid4()
     with pytest.raises(AnnotationTrainingSourceChanged):
         asyncio.run(service._metadata_for_project(project, images, anchor))
+
+
+def test_dataset_rejects_other_users_job():
+    brand = sample_brand()
+    foreign_job_id = uuid4()
+
+    class ForeignJobSession(Session):
+        async def get(self, model, identifier):
+            if model is ProcessingJob and identifier == foreign_job_id:
+                return SimpleNamespace(
+                    id=identifier,
+                    owner_user_id=OTHER_USER_ID,
+                )
+            return await super().get(model, identifier)
+
+    session = ForeignJobSession(brand)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            attach_brand_dataset(
+                brand.id,
+                BrandDatasetAttach(
+                    name="Foreign frames",
+                    job_id=foreign_job_id,
+                ),
+                session,
+                CURRENT_USER,
+            )
+        )
+
+    assert error.value.status_code == 404
+    assert session.added == []

@@ -16,6 +16,7 @@ class Brand(Base):
             name="uq_brands_owner_normalized_name",
         ),
         Index("ix_brands_updated_at", "updated_at"),
+        Index("ix_brands_owner_updated_at", "owner_user_id", "updated_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)

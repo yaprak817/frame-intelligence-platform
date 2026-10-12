@@ -653,3 +653,15 @@ def test_0012_backfills_only_pending_once(restore_database_revision) -> None:
         assert set(
             run_async(remove_annotation_project(job_id, project_id)).values()
         ) == {0}
+
+
+def test_user_ownership_indexes_are_present_in_model_metadata():
+    brand_indexes = {
+        index.name for index in Base.metadata.tables["brands"].indexes
+    }
+    job_indexes = {
+        index.name for index in Base.metadata.tables["processing_jobs"].indexes
+    }
+
+    assert "ix_brands_owner_updated_at" in brand_indexes
+    assert "ix_processing_jobs_owner_created_at" in job_indexes
