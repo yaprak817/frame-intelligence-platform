@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from conftest import TEST_USER_ID
 from PIL import Image
 
 from app.api.dependencies import get_result_artifact_service
@@ -148,6 +149,7 @@ def _job(job_id, status=JobStatus.SUCCEEDED, reference=True) -> ProcessingJob:
     )
     return ProcessingJob(
         id=job_id,
+        owner_user_id=TEST_USER_ID,
         status=status,
         source_type="UPLOAD",
         source_display="clip.mp4",

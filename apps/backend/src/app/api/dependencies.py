@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import get_session
 from app.models.auth import User
-from app.models.processing_job import ProcessingJob
 from app.repositories.jobs import SQLAlchemyJobRepository
 from app.security.source_secrets import SourceSecretCipher
 from app.services.annotation_inference import AnnotationInferenceService
@@ -16,7 +15,7 @@ from app.services.annotation_training import AnnotationTrainingService
 from app.services.annotations import AnnotationService
 from app.services.auth import AuthService
 from app.services.frame_exports import FrameExportService
-from app.services.job_service import JobService
+from app.services.job_service import JobNotFoundError, JobService
 from app.services.result_artifacts import ResultArtifactService
 from app.storage.s3 import S3MultipartUploader, S3ResultObjectStorage
 
@@ -133,8 +132,8 @@ CurrentUserDependency = Annotated[User, Depends(get_current_user)]
 
 async def authorize_result_access(
     request: Request,
-    session: SessionDependency,
     current_user: CurrentUserDependency,
+    service: Annotated[JobService, Depends(get_job_service)],
 ) -> None:
     raw_job_id = request.path_params.get("job_id")
     try:
@@ -145,8 +144,15 @@ async def authorize_result_access(
             detail={"code": "JOB_NOT_FOUND", "message": "Job not found"},
         ) from None
 
-    job = await session.get(ProcessingJob, job_id)
-    if job is None or job.owner_user_id != current_user.id:
+    try:
+        job = await service.get_job(job_id)
+    except JobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "JOB_NOT_FOUND", "message": "Job not found"},
+        ) from None
+
+    if job.owner_user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "JOB_NOT_FOUND", "message": "Job not found"},

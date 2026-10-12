@@ -48,11 +48,11 @@ def test_current_user_returns_authenticated_user():
     assert result is user
     assert auth.calls == ["valid-token"]
 
-class OwnershipSession:
+class OwnershipService:
     def __init__(self, job=None):
         self.job = job
 
-    async def get(self, _model, identifier):
+    async def get_job(self, identifier):
         if self.job is not None and self.job.id == identifier:
             return self.job
         return None
@@ -77,8 +77,8 @@ def test_result_access_allows_job_owner():
     asyncio.run(
         authorize_result_access(
             ownership_request(job.id),
-            OwnershipSession(job),
             user,
+            OwnershipService(job),
         )
     )
 
@@ -91,8 +91,8 @@ def test_result_access_hides_other_users_job():
         asyncio.run(
             authorize_result_access(
                 ownership_request(job.id),
-                OwnershipSession(job),
                 user,
+                OwnershipService(job),
             )
         )
 

@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_annotation_service
+from app.api.dependencies import authorize_result_access, get_annotation_service
 from app.main import app
 from app.models.annotations import AnnotationProject
 from app.schemas.annotations import (
@@ -126,6 +126,7 @@ class FakeAnnotationService:
 def annotation_client():
     service = FakeAnnotationService()
     app.dependency_overrides[get_annotation_service] = lambda: service
+    app.dependency_overrides[authorize_result_access] = lambda: None
     with TestClient(app) as client:
 
         class AllowingLimiter:
