@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { SessionControls } from "@/components/auth/session-controls";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import "./globals.css";
@@ -17,6 +18,7 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
             <span aria-hidden="true" className="brand-mark">FI</span>
             <span>Frame Intelligence</span>
           </Link>
+          <SessionControls />
         </header>
         <main>{children}</main>
       </body>

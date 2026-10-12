@@ -149,3 +149,18 @@ progress { width:100%; height:.7rem; accent-color:var(--green); }
 .auth-security-note { margin:1.5rem 0 0; padding-top:1rem; border-top:1px solid var(--line); color:var(--muted); font-size:.78rem; }
 @media (max-width:800px) { .auth-shell { grid-template-columns:1fr; min-height:auto; gap:2rem; }.auth-intro h1 { max-width:none; }.auth-intro { padding-top:1rem; } }
 @media (max-width:480px) { .auth-shell { width:min(100% - 1.2rem,1120px); }.auth-card { border-radius:1rem; } }
+
+.site-header { display:flex; align-items:center; justify-content:space-between; gap:1rem; }
+.session-controls { display:flex; align-items:center; justify-content:flex-end; gap:.75rem; min-width:0; }
+.session-email { max-width:18rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:.86rem; }
+.session-logout { border:1px solid var(--line); border-radius:.65rem; padding:.55rem .8rem; background:var(--card); color:var(--ink); font-weight:750; cursor:pointer; }
+.session-logout:hover:not(:disabled) { border-color:var(--green); color:var(--green-dark); }
+.session-logout:disabled { opacity:.6; cursor:not-allowed; }
+.session-error { color:var(--red); font-size:.78rem; }
+
+
+@media (max-width:600px) {
+  .site-header { align-items:flex-start; }
+  .session-controls { align-items:flex-end; flex-direction:column; gap:.35rem; }
+  .session-email { max-width:11rem; }
+}
