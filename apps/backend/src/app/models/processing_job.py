@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import (
     JSON,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -27,6 +28,7 @@ class ProcessingJob(Base):
         ),
         Index("ix_processing_jobs_status", "status"),
         Index("ix_processing_jobs_created_at", "created_at"),
+        Index("ix_processing_jobs_owner_created_at", "owner_user_id", "created_at"),
         Index(
             "ix_processing_jobs_idempotency_lookup",
             "idempotency_scope",
@@ -35,6 +37,9 @@ class ProcessingJob(Base):
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     source_type: Mapped[str] = mapped_column(String(16), nullable=False)
     source_display: Mapped[str] = mapped_column(String(2048), nullable=False)

@@ -33,12 +33,13 @@ ALEMBIC_CONFIG = BACKEND_ROOT / "alembic.ini"
 def test_annotation_migration_is_the_single_head(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
-    assert script.get_heads() == ["20261011_0013"]
+    assert script.get_heads() == ["20261012_0014"]
     assert script.get_revision("20260916_0009").down_revision == "20260914_0008"
     assert script.get_revision("20260916_0010").down_revision == "20260916_0009"
     assert script.get_revision("20260916_0011").down_revision == "20260916_0010"
     assert script.get_revision("20260920_0012").down_revision == "20260916_0011"
     assert script.get_revision("20261011_0013").down_revision == "20260920_0012"
+    assert script.get_revision("20261012_0014").down_revision == "20261011_0013"
     assert {
         "annotation_inference_runs",
         "annotation_inference_outbox",
