@@ -1,8 +1,12 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_annotation_service
+from app.api.dependencies import CurrentUserDependency, get_annotation_service
+from app.db.session import get_session
+from app.models.brands import Brand
 from app.schemas.annotations import AnnotationProjectResponse
 from app.schemas.brands import CanonicalUUID
 from app.services.annotations import (
@@ -14,6 +18,17 @@ from app.services.annotations import (
 
 router = APIRouter(prefix="/brands/{brand_id}/annotations")
 Service = Annotated[AnnotationService, Depends(get_annotation_service)]
+Session = Annotated[AsyncSession, Depends(get_session)]
+
+
+async def _require_owned_brand(
+    session: AsyncSession,
+    brand_id: UUID,
+    owner_user_id: UUID,
+) -> None:
+    brand = await session.get(Brand, brand_id)
+    if brand is None or brand.owner_user_id != owner_user_id:
+        raise HTTPException(status_code=404, detail="Marka bulunamad?.")
 
 
 def _error(error: Exception) -> HTTPException:
@@ -59,9 +74,13 @@ async def create_brand_annotation_project(
     brand_id: CanonicalUUID,
     response: Response,
     service: Service,
+    session: Session,
+    current_user: CurrentUserDependency,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> AnnotationProjectResponse:
+    await _require_owned_brand(session, brand_id, current_user.id)
+
     try:
         project, created = await service.get_or_create_brand(brand_id)
         response.status_code = 201 if created else 200
@@ -75,9 +94,13 @@ async def create_brand_annotation_project(
 async def get_brand_annotation_project(
     brand_id: CanonicalUUID,
     service: Service,
+    session: Session,
+    current_user: CurrentUserDependency,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> AnnotationProjectResponse:
+    await _require_owned_brand(session, brand_id, current_user.id)
+
     try:
         project = await service.get_brand(brand_id)
         return await service.response(project, page, page_size)
