@@ -9,6 +9,7 @@ from app.cli.claim_legacy_ownership import (
     apply_plan,
     build_plan,
     normalize_email,
+    run_async,
 )
 
 
@@ -106,3 +107,11 @@ def test_apply_plan_rolls_back_if_unowned_rows_remain():
 
     assert session.rolled_back
     assert not session.committed
+
+
+
+def test_run_async_executes_coroutine():
+    async def sample():
+        return 42
+
+    assert run_async(sample()) == 42

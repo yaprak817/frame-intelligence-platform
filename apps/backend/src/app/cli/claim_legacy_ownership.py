@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -150,10 +151,19 @@ async def run(args: argparse.Namespace) -> int:
         return 0
 
 
+def run_async(coroutine):
+    if sys.platform == "win32":
+        with asyncio.Runner(
+            loop_factory=asyncio.SelectorEventLoop
+        ) as runner:
+            return runner.run(coroutine)
+    return asyncio.run(coroutine)
+
+
 def main() -> None:
     args = parser().parse_args()
     try:
-        raise SystemExit(asyncio.run(run(args)))
+        raise SystemExit(run_async(run(args)))
     except (ValueError, RuntimeError) as error:
         raise SystemExit(str(error)) from error
 
