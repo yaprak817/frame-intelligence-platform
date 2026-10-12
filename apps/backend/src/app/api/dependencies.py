@@ -1,11 +1,12 @@
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Cookie, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_session
+from app.models.auth import User
 from app.repositories.jobs import SQLAlchemyJobRepository
 from app.security.source_secrets import SourceSecretCipher
 from app.services.annotation_inference import AnnotationInferenceService
@@ -102,3 +103,31 @@ def get_annotation_inference_service(
 
 async def authorize_result_access() -> None:
     """Single-tenant authorization seam for future ownership enforcement."""
+
+SESSION_COOKIE_NAME = "frame_session"
+
+
+async def get_current_user(
+    auth: Annotated[AuthService, Depends(get_auth_service)],
+    session_token: Annotated[
+        str | None,
+        Cookie(alias=SESSION_COOKIE_NAME),
+    ] = None,
+) -> User:
+    if not session_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    user = await auth.authenticate(session_token)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    return user
+
+
+CurrentUserDependency = Annotated[User, Depends(get_current_user)]
