@@ -129,9 +129,8 @@ def _canonical_origin(value: str) -> str | None:
     if ":" in host:
         host = f"[{host}]"
 
-    default_port = (
-        (scheme == "http" and port == 80)
-        or (scheme == "https" and port == 443)
+    default_port = (scheme == "http" and port == 80) or (
+        scheme == "https" and port == 443
     )
 
     origin = f"{scheme}://{host}"
@@ -155,11 +154,7 @@ def require_safe_origin(request: Request) -> None:
     supplied_origin = _canonical_origin(supplied)
     request_origin = _canonical_origin(str(request.base_url))
 
-    allowed_origins = {
-        origin
-        for origin in (request_origin,)
-        if origin is not None
-    }
+    allowed_origins = {origin for origin in (request_origin,) if origin is not None}
 
     settings = getattr(request.app.state, "settings", None)
     if settings is not None:
@@ -202,6 +197,7 @@ async def get_current_user(
 
 
 CurrentUserDependency = Annotated[User, Depends(get_current_user)]
+
 
 async def authorize_result_access(
     request: Request,

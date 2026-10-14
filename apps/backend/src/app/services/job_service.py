@@ -93,9 +93,7 @@ class JobService:
             {"source_type": SourceType.URL, "url": raw_url, "processing": config}
         )
         scope = _idempotency_scope(URL_IDEMPOTENCY_SCOPE, owner_user_id)
-        existing = await self._repository.find_by_idempotency(
-            scope, idempotency_key
-        )
+        existing = await self._repository.find_by_idempotency(scope, idempotency_key)
         if existing is not None:
             return self._resolve_idempotent(existing, fingerprint), False
 
@@ -171,9 +169,7 @@ class JobService:
             }
         )
         scope = _idempotency_scope(UPLOAD_IDEMPOTENCY_SCOPE, owner_user_id)
-        existing = await self._repository.find_by_idempotency(
-            scope, idempotency_key
-        )
+        existing = await self._repository.find_by_idempotency(scope, idempotency_key)
         if existing is not None:
             return self._resolve_idempotent(existing, fingerprint), False
 
@@ -283,9 +279,7 @@ class JobService:
             IMAGE_DATASET_IDEMPOTENCY_SCOPE,
             owner_user_id,
         )
-        existing = await self._repository.find_by_idempotency(
-            scope, idempotency_key
-        )
+        existing = await self._repository.find_by_idempotency(scope, idempotency_key)
         job_id = uuid4()
         references: list[S3ObjectReference] = []
         try:

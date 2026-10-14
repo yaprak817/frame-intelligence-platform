@@ -81,12 +81,8 @@ def test_register_creates_session_cookie(auth_client, auth_service):
 
     assert response.status_code == 201
     assert response.json()["email"] == "user@example.com"
-    assert auth_service.register_calls == [
-        ("user@example.com", "StrongPass123!")
-    ]
-    assert auth_service.login_calls == [
-        ("user@example.com", "StrongPass123!")
-    ]
+    assert auth_service.register_calls == [("user@example.com", "StrongPass123!")]
+    assert auth_service.login_calls == [("user@example.com", "StrongPass123!")]
 
     cookie = response.headers["set-cookie"].lower()
     assert "frame_session=opaque-session-token" in cookie
@@ -121,9 +117,7 @@ def test_login_creates_session_cookie(auth_client, auth_service):
 
     assert response.status_code == 200
     assert response.json()["email"] == "user@example.com"
-    assert auth_service.login_calls == [
-        ("user@example.com", "StrongPass123!")
-    ]
+    assert auth_service.login_calls == [("user@example.com", "StrongPass123!")]
     assert "frame_session=opaque-session-token" in response.headers["set-cookie"]
 
 

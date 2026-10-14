@@ -56,9 +56,7 @@ def test_build_plan_targets_registered_active_user():
         ]
     )
 
-    plan = asyncio.run(
-        build_plan(session, " User@Example.COM ")
-    )
+    plan = asyncio.run(build_plan(session, " User@Example.COM "))
 
     assert plan == LegacyOwnershipPlan(
         user_id=user_id,
@@ -72,9 +70,7 @@ def test_build_plan_rejects_unknown_user():
     session = Session([None])
 
     with pytest.raises(ValueError, match="Registered user not found"):
-        asyncio.run(
-            build_plan(session, "missing@example.com")
-        )
+        asyncio.run(build_plan(session, "missing@example.com"))
 
 
 def test_apply_plan_commits_only_after_all_legacy_rows_are_claimed():
@@ -107,7 +103,6 @@ def test_apply_plan_rolls_back_if_unowned_rows_remain():
 
     assert session.rolled_back
     assert not session.committed
-
 
 
 def test_run_async_executes_coroutine():

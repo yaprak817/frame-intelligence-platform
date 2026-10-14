@@ -239,9 +239,7 @@ async def exercise_ownership(job_id, project_id):
                 job.owner_user_id = None
                 await session.flush()
 
-            await session.execute(
-                sa.delete(User).where(User.id == owner_user_id)
-            )
+            await session.execute(sa.delete(User).where(User.id == owner_user_id))
             await session.commit()
         await engine.dispose()
 

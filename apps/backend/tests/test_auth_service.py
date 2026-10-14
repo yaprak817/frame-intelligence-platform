@@ -107,9 +107,7 @@ def test_login_creates_hashed_session_token():
     )
 
     assert returned_user is user
-    auth_session = next(
-        item for item in session.added if isinstance(item, UserSession)
-    )
+    auth_session = next(item for item in session.added if isinstance(item, UserSession))
     assert auth_session.user_id == user.id
     assert auth_session.token_hash == hash_session_token(token)
     assert auth_session.expires_at > auth_session.created_at
