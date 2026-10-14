@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "psycopg[binary]>=3.2",
     "sqlalchemy>=2.0",
+    "argon2-cffi>=25.1.0",
 ]
 
 [build-system]

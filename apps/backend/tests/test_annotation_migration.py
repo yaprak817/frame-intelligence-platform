@@ -33,11 +33,17 @@ ALEMBIC_CONFIG = BACKEND_ROOT / "alembic.ini"
 def test_annotation_migration_is_the_single_head(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
-    assert script.get_heads() == ["20260920_0012"]
+    assert script.get_heads() == ["20261012_0014"]
     assert script.get_revision("20260916_0009").down_revision == "20260914_0008"
     assert script.get_revision("20260916_0010").down_revision == "20260916_0009"
     assert script.get_revision("20260916_0011").down_revision == "20260916_0010"
     assert script.get_revision("20260920_0012").down_revision == "20260916_0011"
+    assert script.get_revision("20261011_0013").down_revision == "20260920_0012"
+    assert script.get_revision("20261012_0014").down_revision == "20261011_0013"
+    assert "ck_user_sessions_expiry" in {
+        constraint.name
+        for constraint in Base.metadata.tables["user_sessions"].constraints
+    }
     assert {
         "annotation_inference_runs",
         "annotation_inference_outbox",
@@ -232,30 +238,42 @@ async def seed_annotation_project() -> tuple:
 
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         async with sessions() as session:
-            session.add(
-                ProcessingJob(
-                    id=job_id,
-                    status=JobStatus.SUCCEEDED,
-                    source_type=SourceType.IMAGE_DATASET,
-                    source_display="migration-test",
-                    source_secret=None,
-                    source_reference={},
-                    processing_config={},
-                    created_at=now,
-                    started_at=now,
-                    completed_at=now,
-                    failure_code=None,
-                    failure_message=None,
-                    attempt_count=1,
-                    idempotency_scope="migration-test",
-                    idempotency_key=str(uuid4()),
-                    request_fingerprint="f" * 64,
-                    result_reference="s3://test/manifest.json",
-                    result_summary={},
-                    run_token=None,
-                    lease_expires_at=None,
-                    version=1,
-                )
+            # Use historical-schema SQL here instead of the current ORM model.
+            # Newer ProcessingJob columns such as owner_user_id do not exist
+            # while migration tests intentionally exercise pre-auth revisions.
+            await session.execute(
+                sa.text(
+                    "INSERT INTO processing_jobs "
+                    "(id, status, source_type, source_display, source_secret, "
+                    "source_reference, processing_config, created_at, started_at, "
+                    "completed_at, failure_code, failure_message, attempt_count, "
+                    "idempotency_scope, idempotency_key, request_fingerprint, "
+                    "result_reference, result_summary, run_token, lease_expires_at, "
+                    "version) VALUES "
+                    "(:id, :status, :source_type, :source_display, NULL, "
+                    "CAST(:source_reference AS json), "
+                    "CAST(:processing_config AS json), "
+                    ":created_at, :started_at, :completed_at, NULL, NULL, 1, "
+                    ":idempotency_scope, :idempotency_key, :request_fingerprint, "
+                    ":result_reference, CAST(:result_summary AS json), "
+                    "NULL, NULL, 1)"
+                ),
+                {
+                    "id": job_id,
+                    "status": JobStatus.SUCCEEDED.value,
+                    "source_type": SourceType.IMAGE_DATASET.value,
+                    "source_display": "migration-test",
+                    "source_reference": json.dumps({}),
+                    "processing_config": json.dumps({}),
+                    "created_at": now,
+                    "started_at": now,
+                    "completed_at": now,
+                    "idempotency_scope": "migration-test",
+                    "idempotency_key": str(uuid4()),
+                    "request_fingerprint": "f" * 64,
+                    "result_reference": "s3://test/manifest.json",
+                    "result_summary": json.dumps({}),
+                },
             )
             await session.flush()
             session.add(
@@ -403,6 +421,7 @@ def test_real_postgres_migration_downgrade_refuses_with_data(
     restore_database_revision,
 ) -> None:
     run_alembic("upgrade", "head")
+    run_alembic("downgrade", "20260920_0012")
     assert "20260920_0012" in run_alembic("current").stdout
     if sys.platform == "win32":
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
@@ -459,7 +478,7 @@ def test_real_postgres_migration_clean_round_trip(restore_database_revision) -> 
 
     run_alembic("downgrade", "20260916_0011")
     assert "20260916_0011" in run_alembic("current").stdout
-    run_alembic("upgrade", "head")
+    run_alembic("upgrade", "20260920_0012")
     assert "20260920_0012" in run_alembic("current").stdout
     if sys.platform == "win32":
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
@@ -476,6 +495,7 @@ def test_0012_refuses_published_pending_outbox_and_preserves_rows(
     restore_database_revision,
 ) -> None:
     run_alembic("upgrade", "head")
+    run_alembic("downgrade", "20260920_0012")
     job_id, project_id, training_id = run_async(seed_annotation_project())
     run_id, event_id = uuid4(), uuid4()
     now = datetime.now(UTC)
@@ -626,7 +646,7 @@ def test_0012_backfills_only_pending_once(restore_database_revision) -> None:
 
     try:
         run_async(rows(True))
-        run_alembic("upgrade", "head")
+        run_alembic("upgrade", "20260920_0012")
         assert run_async(rows(False)) == (1, 0, 1)
     finally:
 
@@ -647,3 +667,15 @@ def test_0012_backfills_only_pending_once(restore_database_revision) -> None:
         assert set(
             run_async(remove_annotation_project(job_id, project_id)).values()
         ) == {0}
+
+
+def test_user_ownership_indexes_are_present_in_model_metadata():
+    brand_indexes = {
+        index.name for index in Base.metadata.tables["brands"].indexes
+    }
+    job_indexes = {
+        index.name for index in Base.metadata.tables["processing_jobs"].indexes
+    }
+
+    assert "ix_brands_owner_updated_at" in brand_indexes
+    assert "ix_processing_jobs_owner_created_at" in job_indexes

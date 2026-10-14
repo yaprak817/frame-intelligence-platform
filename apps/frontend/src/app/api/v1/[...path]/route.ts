@@ -6,13 +6,14 @@ import { isIP } from "node:net";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const REQUEST_HEADERS = ["accept", "content-type", "content-length", "idempotency-key"] as const;
+const REQUEST_HEADERS = ["accept", "content-type", "content-length", "idempotency-key", "cookie"] as const;
 const RESPONSE_HEADERS = [
   "content-type",
   "cache-control",
   "pragma",
   "content-disposition",
   "retry-after",
+  "set-cookie",
 ] as const;
 const API_TIMEOUT_DEFAULT_SECONDS = 30;
 const UPLOAD_TIMEOUT_DEFAULT_SECONDS = 1_800;
@@ -112,6 +113,88 @@ export function requestHeaders(request: NextRequest): Headers {
   return headers;
 }
 
+
+function parseHttpUrl(value: string): URL | null {
+  if (!value || value !== value.trim() || /[\u0000-\u0020\u007f\\]/.test(value)) return null;
+  const authority = value.match(/^https?:\/\/([^/?#]*)/i)?.[1];
+  if (!authority || authority.includes("@")) return null;
+
+  try {
+    const url = new URL(value);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      !url.hostname ||
+      url.hostname.includes("*") ||
+      url.username ||
+      url.password
+    ) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function configuredFrontendPublicOrigin(): URL | null {
+  const configured = process.env.FRONTEND_PUBLIC_ORIGIN;
+  if (!configured || configured.includes("?") || configured.includes("#")) return null;
+
+  const origin = parseHttpUrl(configured);
+  if (!origin || origin.pathname !== "/" || origin.search || origin.hash) return null;
+  return new URL(origin.origin);
+}
+
+function requestHostMatchesPublicOrigin(request: NextRequest, publicOrigin: URL): boolean {
+  const host = request.headers.get("host");
+  if (!host || /[\s\u007f/@?#\\]/.test(host)) return false;
+
+  const requestOrigin = parseHttpUrl(`${publicOrigin.protocol}//${host}`);
+  return Boolean(
+    requestOrigin &&
+    requestOrigin.pathname === "/" &&
+    !requestOrigin.search &&
+    !requestOrigin.hash &&
+    requestOrigin.origin === publicOrigin.origin,
+  );
+}
+
+function originHeaderMatchesPublicOrigin(value: string, publicOrigin: URL): boolean {
+  if (value.includes("?") || value.includes("#")) return false;
+  const origin = parseHttpUrl(value);
+  return Boolean(
+    origin &&
+    origin.pathname === "/" &&
+    !origin.search &&
+    !origin.hash &&
+    origin.origin === publicOrigin.origin,
+  );
+}
+
+function refererMatchesPublicOrigin(value: string, publicOrigin: URL): boolean {
+  if (value.includes("#")) return false;
+  const referer = parseHttpUrl(value);
+  return referer?.origin === publicOrigin.origin;
+}
+
+function browserMutationIsSameOrigin(request: NextRequest): boolean {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return true;
+
+  const origin = request.headers.get("origin");
+  const referer = request.headers.get("referer");
+  if (origin === null && referer === null) {
+    // Preserve non-browser API clients. This check cannot establish their origin;
+    // endpoints reachable this way must be safe for requests without these headers.
+    return true;
+  }
+
+  const publicOrigin = configuredFrontendPublicOrigin();
+  if (!publicOrigin || !requestHostMatchesPublicOrigin(request, publicOrigin)) return false;
+
+  // Origin takes precedence; malformed Origin is rejected instead of falling back.
+  if (origin !== null) return originHeaderMatchesPublicOrigin(origin, publicOrigin);
+  if (referer === null) return false;
+  return refererMatchesPublicOrigin(referer, publicOrigin);
+}
+
 function safeRelativeLocation(value: string | null, request: NextRequest): string | null {
   if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return null;
   try {
@@ -170,6 +253,14 @@ function streamedBody(
 async function forward(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const backend = trustedBackendOrigin();
   const { path } = await context.params;
+
+  if (!browserMutationIsSameOrigin(request)) {
+    return NextResponse.json(
+      { detail: "Cross-origin request rejected" },
+      { status: 403 },
+    );
+  }
+
   if (!backend) {
     return NextResponse.json({ detail: "Backend service is unavailable" }, { status: 503 });
   }

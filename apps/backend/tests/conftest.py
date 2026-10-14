@@ -2,6 +2,8 @@ import base64
 import hashlib
 import os
 from collections.abc import Iterator
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,7 +15,10 @@ os.environ.setdefault(
     "postgresql+psycopg://frame_user:change_me@localhost:5432/frame_intelligence",
 )
 
-from app.api.dependencies import get_job_service  # noqa: E402
+TEST_USER_ID = uuid4()
+TEST_USER = SimpleNamespace(id=TEST_USER_ID, email="user@example.com")
+
+from app.api.dependencies import get_current_user, get_job_service  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.job_outbox import JobOutbox  # noqa: E402
 from app.models.processing_job import ProcessingJob  # noqa: E402
@@ -94,6 +99,7 @@ def client(
 ) -> Iterator[TestClient]:
     service = JobService(repository, cipher, storage)
     app.dependency_overrides[get_job_service] = lambda: service
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
     with TestClient(app) as test_client:
 
         class AllowingLimiter:

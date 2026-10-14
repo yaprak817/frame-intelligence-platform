@@ -85,13 +85,16 @@ class JobService:
         raw_url: str,
         processing: ProcessingConfigRequest,
         idempotency_key: str,
+        *,
+        owner_user_id: UUID | None = None,
     ) -> tuple[ProcessingJob, bool]:
         config = processing.model_dump(mode="json")
         fingerprint = self._cipher.fingerprint(
             {"source_type": SourceType.URL, "url": raw_url, "processing": config}
         )
+        scope = _idempotency_scope(URL_IDEMPOTENCY_SCOPE, owner_user_id)
         existing = await self._repository.find_by_idempotency(
-            URL_IDEMPOTENCY_SCOPE, idempotency_key
+            scope, idempotency_key
         )
         if existing is not None:
             return self._resolve_idempotent(existing, fingerprint), False
@@ -100,6 +103,7 @@ class JobService:
         now = datetime.now(UTC)
         job = ProcessingJob(
             id=job_id,
+            owner_user_id=owner_user_id,
             status=JobStatus.PENDING_DISPATCH,
             source_type=SourceType.URL,
             source_display=safe_url_display(raw_url),
@@ -112,7 +116,7 @@ class JobService:
             failure_code=None,
             failure_message=None,
             attempt_count=0,
-            idempotency_scope=URL_IDEMPOTENCY_SCOPE,
+            idempotency_scope=scope,
             idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
             result_reference=None,
@@ -135,7 +139,7 @@ class JobService:
             await self._repository.create_with_outbox(job, event)
         except DuplicateIdempotencyKeyError:
             concurrent = await self._repository.find_by_idempotency(
-                URL_IDEMPOTENCY_SCOPE, idempotency_key
+                scope, idempotency_key
             )
             if concurrent is None:
                 raise
@@ -150,6 +154,8 @@ class JobService:
         file_size: int | None,
         processing: ProcessingConfigRequest,
         idempotency_key: str,
+        *,
+        owner_user_id: UUID | None = None,
     ) -> tuple[ProcessingJob, bool]:
         if self._storage is None:
             raise RuntimeError("Object storage is not configured")
@@ -164,8 +170,9 @@ class JobService:
                 "processing": config,
             }
         )
+        scope = _idempotency_scope(UPLOAD_IDEMPOTENCY_SCOPE, owner_user_id)
         existing = await self._repository.find_by_idempotency(
-            UPLOAD_IDEMPOTENCY_SCOPE, idempotency_key
+            scope, idempotency_key
         )
         if existing is not None:
             return self._resolve_idempotent(existing, fingerprint), False
@@ -176,6 +183,7 @@ class JobService:
         now = datetime.now(UTC)
         job = ProcessingJob(
             id=job_id,
+            owner_user_id=owner_user_id,
             status=JobStatus.PENDING_DISPATCH,
             source_type=SourceType.UPLOAD,
             source_display=safe_name,
@@ -188,7 +196,7 @@ class JobService:
             failure_code=None,
             failure_message=None,
             attempt_count=0,
-            idempotency_scope=UPLOAD_IDEMPOTENCY_SCOPE,
+            idempotency_scope=scope,
             idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
             result_reference=None,
@@ -212,7 +220,7 @@ class JobService:
         except DuplicateIdempotencyKeyError:
             await self._compensate(reference, job_id)
             concurrent = await self._repository.find_by_idempotency(
-                UPLOAD_IDEMPOTENCY_SCOPE, idempotency_key
+                scope, idempotency_key
             )
             if concurrent is None:
                 raise
@@ -237,6 +245,7 @@ class JobService:
         *,
         archive: bool,
         idempotency_key: str,
+        owner_user_id: UUID | None = None,
     ) -> tuple[ProcessingJob, bool]:
         if self._storage is None:
             raise RuntimeError("Object storage is not configured")
@@ -270,8 +279,12 @@ class JobService:
         if total > self._image_max_total_bytes:
             raise UnsupportedUploadError("Dataset upload exceeds the configured limit")
 
+        scope = _idempotency_scope(
+            IMAGE_DATASET_IDEMPOTENCY_SCOPE,
+            owner_user_id,
+        )
         existing = await self._repository.find_by_idempotency(
-            IMAGE_DATASET_IDEMPOTENCY_SCOPE, idempotency_key
+            scope, idempotency_key
         )
         job_id = uuid4()
         references: list[S3ObjectReference] = []
@@ -322,6 +335,7 @@ class JobService:
         now = datetime.now(UTC)
         job = ProcessingJob(
             id=job_id,
+            owner_user_id=owner_user_id,
             status=JobStatus.PENDING_DISPATCH,
             source_type=SourceType.IMAGE_DATASET,
             source_display=(
@@ -343,7 +357,7 @@ class JobService:
             failure_code=None,
             failure_message=None,
             attempt_count=0,
-            idempotency_scope=IMAGE_DATASET_IDEMPOTENCY_SCOPE,
+            idempotency_scope=scope,
             idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
             result_reference=None,
@@ -367,7 +381,7 @@ class JobService:
         except DuplicateIdempotencyKeyError:
             await self._compensate_dataset(references, job_id)
             concurrent = await self._repository.find_by_idempotency(
-                IMAGE_DATASET_IDEMPOTENCY_SCOPE, idempotency_key
+                scope, idempotency_key
             )
             if concurrent is None:
                 raise
@@ -403,6 +417,15 @@ class JobService:
                 logger.exception("Dataset object cleanup failed for job %s", job_id)
         if failed:
             raise ObjectStorageError("Dataset cleanup requires recovery")
+
+
+def _idempotency_scope(base: str, owner_user_id: UUID | None) -> str:
+    if owner_user_id is None:
+        return base
+    scope = f"{base}:{owner_user_id.hex}"
+    if len(scope) > 64:
+        raise ValueError("User-scoped idempotency scope exceeds storage limit")
+    return scope
 
 
 class _CountingUpload:

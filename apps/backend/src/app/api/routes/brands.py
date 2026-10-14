@@ -7,9 +7,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import CurrentUserDependency
 from app.db.session import get_session
 from app.models.annotations import AnnotationProject
 from app.models.brands import Brand, BrandClass, BrandDataset
+from app.models.processing_job import ProcessingJob
 from app.schemas.brands import (
     BrandClassCreate,
     BrandClassView,
@@ -34,9 +36,13 @@ def _normalize(value: str) -> str:
     return " ".join(value.strip().casefold().split())
 
 
-async def _brand_or_404(session: AsyncSession, brand_id: UUID) -> Brand:
+async def _brand_or_404(
+    session: AsyncSession,
+    brand_id: UUID,
+    owner_user_id: UUID,
+) -> Brand:
     brand = await session.get(Brand, brand_id)
-    if brand is None:
+    if brand is None or brand.owner_user_id != owner_user_id:
         raise HTTPException(status_code=404, detail="Marka bulunamadı.")
     return brand
 
@@ -44,12 +50,14 @@ async def _brand_or_404(session: AsyncSession, brand_id: UUID) -> Brand:
 @router.get("", response_model=list[BrandSummary])
 async def list_brands(
     session: Session,
+    current_user: CurrentUserDependency,
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=10000),
 ) -> list[BrandSummary]:
     brands = (
         await session.scalars(
             select(Brand)
+            .where(Brand.owner_user_id == current_user.id)
             .order_by(Brand.updated_at.desc(), Brand.name.asc(), Brand.id)
             .offset(offset)
             .limit(limit)
@@ -85,6 +93,7 @@ async def list_brands(
 async def create_brand(
     payload: BrandCreate,
     session: Session,
+    current_user: CurrentUserDependency,
 ) -> BrandSummary:
     name = " ".join(payload.name.strip().split())
     normalized = _normalize(name)
@@ -94,6 +103,7 @@ async def create_brand(
     now = datetime.now(timezone.utc)
     brand = Brand(
         id=uuid4(),
+        owner_user_id=current_user.id,
         name=name,
         normalized_name=normalized,
         status="DRAFT",
@@ -105,7 +115,7 @@ async def create_brand(
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        if _constraint_name(exc) != "uq_brands_normalized_name":
+        if _constraint_name(exc) != "uq_brands_owner_normalized_name":
             raise
         raise HTTPException(status_code=409, detail="Bu marka zaten mevcut.") from exc
 
@@ -123,10 +133,11 @@ async def create_brand(
 async def get_brand(
     brand_id: CanonicalUUID,
     session: Session,
+    current_user: CurrentUserDependency,
     class_limit: int = Query(default=100, ge=1, le=100),
     dataset_limit: int = Query(default=100, ge=1, le=100),
 ) -> BrandDetail:
-    brand = await _brand_or_404(session, brand_id)
+    brand = await _brand_or_404(session, brand_id, current_user.id)
     classes = (
         await session.scalars(
             select(BrandClass)
@@ -175,8 +186,9 @@ async def create_brand_class(
     brand_id: CanonicalUUID,
     payload: BrandClassCreate,
     session: Session,
+    current_user: CurrentUserDependency,
 ) -> BrandClassView:
-    brand = await _brand_or_404(session, brand_id)
+    brand = await _brand_or_404(session, brand_id, current_user.id)
     class_count = await session.scalar(
         select(func.count())
         .select_from(BrandClass)
@@ -224,8 +236,9 @@ async def attach_brand_dataset(
     brand_id: CanonicalUUID,
     payload: BrandDatasetAttach,
     session: Session,
+    current_user: CurrentUserDependency,
 ) -> BrandDatasetView:
-    brand = await _brand_or_404(session, brand_id)
+    brand = await _brand_or_404(session, brand_id, current_user.id)
     name = " ".join(payload.name.strip().split())
     if not name:
         raise HTTPException(status_code=422, detail="Veri seti adı boş olamaz.")
@@ -243,6 +256,11 @@ async def attach_brand_dataset(
         if payload.job_id is not None and payload.job_id != project.job_id:
             raise HTTPException(status_code=409, detail="Veri seti kaynağı uyuşmuyor.")
         source_job_id = project.job_id
+
+    if source_job_id is not None:
+        source_job = await session.get(ProcessingJob, source_job_id)
+        if source_job is None or source_job.owner_user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="?? bulunamad?.")
 
     if source_job_id is not None:
         owner = await session.scalar(

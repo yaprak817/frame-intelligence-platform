@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import TEST_USER_ID
 from fastapi.testclient import TestClient
 
 from app.domain.jobs import FailureCode, JobStatus
@@ -35,6 +36,7 @@ def test_create_url_job_returns_202_without_raw_url(
     assert response.headers["location"] == payload["status_url"]
     assert "super-secret" not in response.text
     job = next(iter(repository.jobs.values()))
+    assert job.owner_user_id == TEST_USER_ID
     assert raw_url not in job.source_secret
 
 
@@ -159,6 +161,25 @@ def test_unknown_or_invalid_job_id_returns_404(client: TestClient, job_id: str) 
     }
 
 
+def test_other_users_job_is_hidden(client: TestClient, repository) -> None:
+    created = client.post(
+        "/api/v1/jobs/url",
+        headers=VALID_HEADERS,
+        json={"url": "https://example.com/private"},
+    )
+    assert created.status_code == 202
+
+    job = next(iter(repository.jobs.values()))
+    job.owner_user_id = uuid4()
+
+    response = client.get(created.json()["status_url"])
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": {"code": "JOB_NOT_FOUND", "message": "Job not found"}
+    }
+
+
 def test_failed_job_returns_only_safe_failure(
     client: TestClient,
     repository,
@@ -167,6 +188,7 @@ def test_failed_job_returns_only_safe_failure(
     now = datetime.now(UTC)
     repository.jobs[job_id] = ProcessingJob(
         id=job_id,
+        owner_user_id=TEST_USER_ID,
         status=JobStatus.FAILED,
         source_type="URL",
         source_display="https://example.com/video",
@@ -207,6 +229,7 @@ def test_succeeded_job_returns_safe_result_descriptor(
     )
     repository.jobs[job_id] = ProcessingJob(
         id=job_id,
+        owner_user_id=TEST_USER_ID,
         status=JobStatus.SUCCEEDED,
         source_type="UPLOAD",
         source_display="clip.mp4",

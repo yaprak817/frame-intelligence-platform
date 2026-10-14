@@ -185,6 +185,10 @@ async def exercise_dispatch(project_id, training_id):
         await engine.dispose()
 
 
+@pytest.mark.skipif(
+    os.environ.get("TEST_DATABASE_URL") is None,
+    reason="TEST_DATABASE_URL is required for PostgreSQL integration tests",
+)
 def test_inference_outbox_transaction_retry_and_parallel_publish():
     job_id, project_id, training_id = run_async(seed_annotation_project())
     try:
