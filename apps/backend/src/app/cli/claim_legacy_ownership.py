@@ -35,9 +35,7 @@ async def build_plan(
     if not normalized:
         raise ValueError("Target email is required")
 
-    user = await session.scalar(
-        select(User).where(User.email == normalized)
-    )
+    user = await session.scalar(select(User).where(User.email == normalized))
     if user is None:
         raise ValueError("Registered user not found")
     if not user.is_active:
@@ -45,9 +43,7 @@ async def build_plan(
 
     brand_count = int(
         await session.scalar(
-            select(func.count())
-            .select_from(Brand)
-            .where(Brand.owner_user_id.is_(None))
+            select(func.count()).select_from(Brand).where(Brand.owner_user_id.is_(None))
         )
         or 0
     )
@@ -85,9 +81,7 @@ async def apply_plan(
 
     remaining_brands = int(
         await session.scalar(
-            select(func.count())
-            .select_from(Brand)
-            .where(Brand.owner_user_id.is_(None))
+            select(func.count()).select_from(Brand).where(Brand.owner_user_id.is_(None))
         )
         or 0
     )
@@ -153,9 +147,7 @@ async def run(args: argparse.Namespace) -> int:
 
 def run_async(coroutine):
     if sys.platform == "win32":
-        with asyncio.Runner(
-            loop_factory=asyncio.SelectorEventLoop
-        ) as runner:
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             return runner.run(coroutine)
     return asyncio.run(coroutine)
 

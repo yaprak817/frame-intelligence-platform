@@ -4,9 +4,11 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import boto3
@@ -33,6 +35,69 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("ASYNC_E2E_INTEGRATION") != "1",
     reason="ASYNC_E2E_INTEGRATION=1 is required",
 )
+
+
+@pytest.fixture
+def authenticated_backend_client() -> Iterator[httpx.Client]:
+    backend_url = os.environ.get("BACKEND_URL")
+    if backend_url is None:
+        raise RuntimeError("The async integration harness BACKEND_URL is required")
+
+    try:
+        backend = urlsplit(backend_url)
+        database = urlsplit(settings.database_url)
+        backend_port = backend.port
+    except ValueError:
+        raise RuntimeError("The async integration harness target is invalid") from None
+
+    database_name = database.path.lstrip("/")
+    if (
+        os.environ.get("ENVIRONMENT") != "test"
+        or backend.scheme != "http"
+        or backend.hostname != "127.0.0.1"
+        or backend_port is None
+        or backend.username is not None
+        or backend.password is not None
+        or backend.path not in {"", "/"}
+        or backend.query
+        or backend.fragment
+        or not database_name.startswith("frame_async_")
+    ):
+        raise RuntimeError(
+            "The async integration harness must use isolated local services"
+        )
+
+    client = httpx.Client(
+        base_url=backend_url,
+        headers={"Origin": backend_url.rstrip("/")},
+        timeout=10,
+    )
+    try:
+        registration = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": f"worker-dataset-{uuid4()}@example.test",
+                "password": f"Worker_{uuid4()}_Only!",
+            },
+        )
+        assert registration.status_code == 201, (
+            "Worker dataset test-user registration expected HTTP 201, "
+            f"got {registration.status_code}."
+        )
+        user_id = UUID(registration.json()["id"])
+        assert client.cookies.get("frame_session"), (
+            "Worker dataset registration did not set a session cookie."
+        )
+
+        current_user = client.get("/api/v1/auth/me")
+        assert current_user.status_code == 200, (
+            "Worker dataset test session expected HTTP 200 from auth/me, "
+            f"got {current_user.status_code}."
+        )
+        assert UUID(current_user.json()["id"]) == user_id
+        yield client
+    finally:
+        client.close()
 
 
 def _s3():
@@ -192,18 +257,19 @@ def _row(database_url: str, job_id: UUID):
         ).fetchone()
 
 
-def test_real_worker_hard_loss_redelivery_cleans_only_stale_attempt() -> None:
+def test_real_worker_hard_loss_redelivery_cleans_only_stale_attempt(
+    authenticated_backend_client: httpx.Client,
+) -> None:
     database_url = settings.database_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
-    backend_url = os.environ["BACKEND_URL"]
     other_job, previous = uuid4(), uuid4()
     client = _s3()
     job_id = None
     preservation: set[str] = set()
     with _worker("dataset-hard-loss-a") as worker_a:
-        response = httpx.post(
-            f"{backend_url}/api/v1/jobs/image-dataset",
+        response = authenticated_backend_client.post(
+            "/api/v1/jobs/image-dataset",
             headers={"Idempotency-Key": f"hard-loss-{uuid4()}"},
             files=_images(60),
             timeout=60,
@@ -287,12 +353,11 @@ def test_real_worker_hard_loss_redelivery_cleans_only_stale_attempt() -> None:
 
 
 def test_two_real_workers_concurrent_duplicate_delivery_publishes_once(
-    tmp_path,
+    tmp_path, authenticated_backend_client: httpx.Client
 ) -> None:
     database_url = settings.database_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
-    backend_url = os.environ["BACKEND_URL"]
     client = _s3()
     job_id = None
     foreign_job = uuid4()
@@ -321,8 +386,8 @@ def test_two_real_workers_concurrent_duplicate_delivery_publishes_once(
         with _instrumented_worker(
             "dataset-duplicate-a", settings.task_queue, a_bootstrap
         ):
-            response = httpx.post(
-                f"{backend_url}/api/v1/jobs/image-dataset",
+            response = authenticated_backend_client.post(
+                "/api/v1/jobs/image-dataset",
                 headers={"Idempotency-Key": f"concurrent-duplicate-{uuid4()}"},
                 files=_images(40),
                 timeout=60,
@@ -433,12 +498,14 @@ def test_two_real_workers_concurrent_duplicate_delivery_publishes_once(
                 connection.execute("DELETE FROM processing_jobs WHERE id=%s", (job_id,))
 
 
-def test_real_minio_soft_timeout_cleans_temp_partial_and_body(monkeypatch) -> None:
+def test_real_minio_soft_timeout_cleans_temp_partial_and_body(
+    monkeypatch, authenticated_backend_client: httpx.Client
+) -> None:
     database_url = settings.database_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
-    response = httpx.post(
-        f"{os.environ['BACKEND_URL']}/api/v1/jobs/image-dataset",
+    response = authenticated_backend_client.post(
+        "/api/v1/jobs/image-dataset",
         headers={"Idempotency-Key": f"soft-timeout-{uuid4()}"},
         files=_images(1),
         timeout=30,

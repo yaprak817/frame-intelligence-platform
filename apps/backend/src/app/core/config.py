@@ -207,13 +207,9 @@ class Settings(BaseSettings):
                     "TRUSTED_PROXY_CIDRS contains an invalid network"
                 ) from error
         if not 300 <= self.auth_session_ttl_seconds <= 30 * 24 * 60 * 60:
-            raise ValueError(
-                "AUTH_SESSION_TTL_SECONDS must be between 300 and 2592000"
-            )
+            raise ValueError("AUTH_SESSION_TTL_SECONDS must be between 300 and 2592000")
         if not 1 <= self.rate_limit_auth_requests <= 10_000:
-            raise ValueError(
-                "RATE_LIMIT_AUTH_REQUESTS must be between 1 and 10000"
-            )
+            raise ValueError("RATE_LIMIT_AUTH_REQUESTS must be between 1 and 10000")
         if not 1 <= self.rate_limit_submission_requests <= 10_000:
             raise ValueError(
                 "RATE_LIMIT_SUBMISSION_REQUESTS must be between 1 and 10000"

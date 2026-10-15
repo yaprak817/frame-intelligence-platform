@@ -63,11 +63,7 @@ class AuthService:
     async def login(self, email: str, password: str) -> tuple[User, str]:
         user = await self.session.scalar(select(User).where(User.email == email))
 
-        password_hash = (
-            user.password_hash
-            if user is not None
-            else _DUMMY_PASSWORD_HASH
-        )
+        password_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
         password_valid = verify_password(password, password_hash)
 
         if user is None or not user.is_active or not password_valid:

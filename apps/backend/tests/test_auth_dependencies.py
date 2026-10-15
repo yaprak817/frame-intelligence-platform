@@ -48,6 +48,7 @@ def test_current_user_returns_authenticated_user():
     assert result is user
     assert auth.calls == ["valid-token"]
 
+
 class OwnershipService:
     def __init__(self, job=None):
         self.job = job

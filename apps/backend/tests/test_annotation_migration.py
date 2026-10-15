@@ -670,9 +670,7 @@ def test_0012_backfills_only_pending_once(restore_database_revision) -> None:
 
 
 def test_user_ownership_indexes_are_present_in_model_metadata():
-    brand_indexes = {
-        index.name for index in Base.metadata.tables["brands"].indexes
-    }
+    brand_indexes = {index.name for index in Base.metadata.tables["brands"].indexes}
     job_indexes = {
         index.name for index in Base.metadata.tables["processing_jobs"].indexes
     }

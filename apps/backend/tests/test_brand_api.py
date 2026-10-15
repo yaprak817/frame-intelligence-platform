@@ -116,14 +116,17 @@ def test_brand_create_list_and_detail_are_public_safe():
         "dataset_count",
         "updated_at",
     }
-    assert asyncio.run(
-        list_brands(
-            limit=10,
-            offset=0,
-            session=session,
-            current_user=CURRENT_USER,
+    assert (
+        asyncio.run(
+            list_brands(
+                limit=10,
+                offset=0,
+                session=session,
+                current_user=CURRENT_USER,
+            )
         )
-    ) == []
+        == []
+    )
     brand = sample_brand()
     detail = asyncio.run(
         get_brand(
@@ -185,7 +188,6 @@ def test_unrelated_integrity_error_is_not_mapped_to_conflict():
     assert session.rollbacks == 1
 
 
-
 def test_other_users_brand_is_hidden():
     brand = sample_brand()
     brand.owner_user_id = OTHER_USER_ID
@@ -202,6 +204,7 @@ def test_other_users_brand_is_hidden():
         )
 
     assert error.value.status_code == 404
+
 
 def test_brand_collection_caps_reject_new_class_and_dataset():
     brand = sample_brand()
@@ -248,17 +251,13 @@ def test_cross_brand_project_and_job_mismatch_cannot_attach():
         name="Dataset", job_id=project.job_id, annotation_project_id=project.id
     )
     with pytest.raises(HTTPException) as error:
-        asyncio.run(
-            attach_brand_dataset(own_brand.id, payload, session, CURRENT_USER)
-        )
+        asyncio.run(attach_brand_dataset(own_brand.id, payload, session, CURRENT_USER))
     assert error.value.status_code == 409
     assert session.added == []
     project.brand_id = own_brand.id
     payload.job_id = uuid4()
     with pytest.raises(HTTPException) as error:
-        asyncio.run(
-            attach_brand_dataset(own_brand.id, payload, session, CURRENT_USER)
-        )
+        asyncio.run(attach_brand_dataset(own_brand.id, payload, session, CURRENT_USER))
     assert error.value.status_code == 409
 
 

@@ -22,9 +22,7 @@ def make_request(
 
     app = SimpleNamespace(
         state=SimpleNamespace(
-            settings=SimpleNamespace(
-                cors_allow_origins=cors_origins or []
-            )
+            settings=SimpleNamespace(cors_allow_origins=cors_origins or [])
         )
     )
 
@@ -44,9 +42,7 @@ def make_request(
 
 
 def test_same_origin_mutation_is_allowed():
-    require_safe_origin(
-        make_request(origin="https://app.example")
-    )
+    require_safe_origin(make_request(origin="https://app.example"))
 
 
 def test_configured_frontend_origin_is_allowed():
@@ -60,20 +56,14 @@ def test_configured_frontend_origin_is_allowed():
 
 def test_cross_origin_mutation_is_rejected():
     with pytest.raises(HTTPException) as error:
-        require_safe_origin(
-            make_request(origin="https://evil.example")
-        )
+        require_safe_origin(make_request(origin="https://evil.example"))
 
     assert error.value.status_code == 403
 
 
 def test_cross_origin_referer_is_rejected():
     with pytest.raises(HTTPException) as error:
-        require_safe_origin(
-            make_request(
-                referer="https://evil.example/attack"
-            )
-        )
+        require_safe_origin(make_request(referer="https://evil.example/attack"))
 
     assert error.value.status_code == 403
 
