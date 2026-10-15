@@ -1,6 +1,9 @@
 services:
   frontend:
     container_name: !reset null
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+      FRONTEND_PUBLIC_ORIGIN: "http://${FULL_STACK_E2E_PUBLIC_HOST:-127.0.0.1}:${FULL_STACK_E2E_FRONTEND_PORT}"
     ports: !override
       - "127.0.0.1:${FULL_STACK_E2E_FRONTEND_PORT}:3000"
     restart: "no"
