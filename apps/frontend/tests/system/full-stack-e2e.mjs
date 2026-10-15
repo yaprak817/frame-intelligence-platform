@@ -927,27 +927,35 @@ async function main() {
       if (!postgresBefore || postgresAfter === postgresBefore || !minioBefore || minioAfter === minioBefore) {
         throw new Error("PostgreSQL veya MinIO kalıcılık testinde yeniden oluşturulmadı.");
       }
-      const persisted = await withAuthenticatedRequestContext(baseUrl, authState, (request) => request.get(`${baseUrl}/api/v1/jobs/${result.jobId}`));
-      const persistedBody = await persisted.json();
-      if (!persisted.ok() || persistedBody?.status !== "SUCCEEDED") {
+      const persisted = await withAuthenticatedRequestContext(baseUrl, authState, async (request) => {
+        const response = await request.get(`${baseUrl}/api/v1/jobs/${result.jobId}`);
+        return { ok: response.ok(), body: await response.json() };
+      });
+      if (!persisted.ok || persisted.body?.status !== "SUCCEEDED") {
         throw new Error("PostgreSQL kalıcılığı kontrollü restart sonrasında doğrulanamadı.");
       }
-      const resultResponse = await withAuthenticatedRequestContext(baseUrl, authState, (request) => request.get(`${baseUrl}/api/v1/jobs/${result.jobId}/result`));
-      const resultBody = await resultResponse.json();
-      if (!resultResponse.ok() || !Array.isArray(resultBody?.frames) || resultBody.frames.length < 1) {
+      const resultResponse = await withAuthenticatedRequestContext(baseUrl, authState, async (request) => {
+        const response = await request.get(`${baseUrl}/api/v1/jobs/${result.jobId}/result`);
+        return { ok: response.ok(), body: await response.json() };
+      });
+      if (!resultResponse.ok || !Array.isArray(resultResponse.body?.frames) || resultResponse.body.frames.length < 1) {
         throw new Error("MinIO kalıcılığı kontrollü restart sonrasında doğrulanamadı.");
       }
       await verifyPersistedResultPage(baseUrl, result.jobId, authState);
-      const manifestResponse = await withAuthenticatedRequestContext(baseUrl, authState, (request) => request.get(`${baseUrl}/api/v1/jobs/${result.jobId}/result/manifest`));
-      const manifest = await manifestResponse.json();
-      if (!manifestResponse.ok() || !manifestIsPublic(manifest, result.jobId)) {
+      const manifestResponse = await withAuthenticatedRequestContext(baseUrl, authState, async (request) => {
+        const response = await request.get(`${baseUrl}/api/v1/jobs/${result.jobId}/result/manifest`);
+        return { ok: response.ok(), body: await response.json() };
+      });
+      if (!manifestResponse.ok || !manifestIsPublic(manifestResponse.body, result.jobId)) {
         throw new Error("Restart sonrası kalıcı manifest doğrulanamadı.");
       }
     }
     if (PRODUCTION_E2E) {
-      const persistedTraining = await withAuthenticatedRequestContext(baseUrl, authState, (request) => request.get(`${baseUrl}/api/v1/jobs/${trainingDataset.jobId}/annotations/models/latest`));
-      const persistedTrainingBody = await persistedTraining.json();
-      if (!persistedTraining.ok() || persistedTrainingBody?.model_version !== training.modelVersion) throw new Error("Training/model persistence restart verification failed.");
+      const persistedTraining = await withAuthenticatedRequestContext(baseUrl, authState, async (request) => {
+        const response = await request.get(`${baseUrl}/api/v1/jobs/${trainingDataset.jobId}/annotations/models/latest`);
+        return { ok: response.ok(), body: await response.json() };
+      });
+      if (!persistedTraining.ok || persistedTraining.body?.model_version !== training.modelVersion) throw new Error("Training/model persistence restart verification failed.");
     }
     const persistedAnnotation = await docker(project, env, ["exec", "-T", "postgres", "psql", "-U", env.POSTGRES_USER, "-d", env.POSTGRES_DB, "-At", "-c", `SELECT i.completed::text || '|' || count(b.id)::text || '|' || min(b.x_center)::text || '|' || min(b.y_center)::text || '|' || min(b.width)::text || '|' || min(b.height)::text FROM annotation_images i JOIN annotation_projects p ON p.id=i.project_id LEFT JOIN annotation_boxes b ON b.project_id=i.project_id AND b.image_index=i.image_index WHERE p.job_id='${result.jobId}' AND i.image_index=0 GROUP BY i.completed;`], { timeoutMs: 30_000 });
     const persistedParts = persistedAnnotation.stdout.split("|");
