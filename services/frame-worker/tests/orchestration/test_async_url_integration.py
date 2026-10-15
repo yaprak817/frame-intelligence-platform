@@ -1,5 +1,6 @@
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -30,6 +31,40 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("ASYNC_E2E_INTEGRATION") != "1",
     reason="ASYNC_E2E_INTEGRATION=1 is required",
 )
+
+
+@pytest.fixture
+def authenticated_backend_client() -> Iterator[tuple[httpx.Client, UUID]]:
+    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8000")
+    client = httpx.Client(
+        base_url=backend_url,
+        headers={"Origin": backend_url.rstrip("/")},
+        timeout=10,
+    )
+    try:
+        registration = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": f"worker-integration-{uuid4()}@example.test",
+                "password": f"Worker_{uuid4()}_Only!",
+            },
+        )
+        assert registration.status_code == 201, (
+            "Worker test-user registration expected HTTP 201, "
+            f"got {registration.status_code}."
+        )
+        user_id = UUID(registration.json()["id"])
+        assert client.cookies.get("frame_session")
+
+        current_user = client.get("/api/v1/auth/me")
+        assert current_user.status_code == 200, (
+            "Worker test session expected HTTP 200 from auth/me, "
+            f"got {current_user.status_code}."
+        )
+        assert UUID(current_user.json()["id"]) == user_id
+        yield client, user_id
+    finally:
+        client.close()
 
 
 class TestSafeURLSource:
@@ -166,7 +201,9 @@ def _cleanup_result(manifest: dict, manifest_key: str) -> None:
     client.delete_object(Bucket=settings.object_storage_bucket, Key=manifest_key)
 
 
-def test_real_publisher_redis_celery_url_job_succeeds(monkeypatch, tmp_path) -> None:
+def test_real_publisher_redis_celery_url_job_succeeds(
+    monkeypatch, tmp_path, authenticated_backend_client
+) -> None:
     raw_url = "https://example.invalid/video?token=integration-secret"
     video = tmp_path / "source.mp4"
     video.write_bytes(b"test-safe-source-boundary")
@@ -183,7 +220,7 @@ def test_real_publisher_redis_celery_url_job_succeeds(monkeypatch, tmp_path) -> 
         )
 
     monkeypatch.setattr(tasks, "build_runner", build_test_runner)
-    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8000")
+    client, user_id = authenticated_backend_client
     psycopg_url = settings.database_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
@@ -194,8 +231,8 @@ def test_real_publisher_redis_celery_url_job_succeeds(monkeypatch, tmp_path) -> 
         queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
-        response = httpx.post(
-            f"{backend_url}/api/v1/jobs/url",
+        response = client.post(
+            "/api/v1/jobs/url",
             headers={"Idempotency-Key": f"async-url-e2e-{uuid4()}"},
             json={
                 "url": raw_url,
@@ -204,9 +241,10 @@ def test_real_publisher_redis_celery_url_job_succeeds(monkeypatch, tmp_path) -> 
                     "selection_window_seconds": 1,
                 },
             },
-            timeout=10,
         )
-        response.raise_for_status()
+        assert response.status_code == 202, (
+            f"URL submission expected HTTP 202, got {response.status_code}."
+        )
         assert raw_url not in response.text
         job_id = UUID(response.json()["job_id"])
 
@@ -216,7 +254,7 @@ def test_real_publisher_redis_celery_url_job_succeeds(monkeypatch, tmp_path) -> 
             with psycopg.connect(psycopg_url) as connection:
                 row = connection.execute(
                     "SELECT status, result_summary, result_reference, source_secret, "
-                    "failure_message, run_token, lease_expires_at "
+                    "failure_message, run_token, lease_expires_at, owner_user_id "
                     "FROM processing_jobs WHERE id=%s",
                     (job_id,),
                 ).fetchone()
@@ -243,6 +281,7 @@ def test_real_publisher_redis_celery_url_job_succeeds(monkeypatch, tmp_path) -> 
         assert row[4] is None
         assert row[5] is None
         assert row[6] is None
+        assert row[7] == user_id
 
     assert job_id
     _cleanup_result(manifest, manifest_key)
@@ -254,7 +293,9 @@ def test_real_publisher_redis_celery_url_job_succeeds(monkeypatch, tmp_path) -> 
         connection.execute("DELETE FROM processing_jobs WHERE id=%s", (job_id,))
 
 
-def test_real_publisher_redis_celery_upload_job_succeeds(monkeypatch) -> None:
+def test_real_publisher_redis_celery_upload_job_succeeds(
+    monkeypatch, authenticated_backend_client
+) -> None:
     def build_test_runner() -> JobRunner:
         repository = JobRepository.from_url(settings.database_url)
         return TestSafeUploadRunner(
@@ -265,7 +306,7 @@ def test_real_publisher_redis_celery_upload_job_succeeds(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(tasks, "build_runner", build_test_runner)
-    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8000")
+    client, _user_id = authenticated_backend_client
     psycopg_url = settings.database_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
@@ -277,13 +318,14 @@ def test_real_publisher_redis_celery_upload_job_succeeds(monkeypatch) -> None:
         queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
-        response = httpx.post(
-            f"{backend_url}/api/v1/jobs/upload",
+        response = client.post(
+            "/api/v1/jobs/upload",
             headers={"Idempotency-Key": f"async-upload-e2e-{uuid4()}"},
             files={"file": ("clip.mp4", b"test-safe-upload", "video/mp4")},
-            timeout=10,
         )
-        response.raise_for_status()
+        assert response.status_code == 202, (
+            f"Upload submission expected HTTP 202, got {response.status_code}."
+        )
         job_id = UUID(response.json()["job_id"])
 
         deadline = time.monotonic() + 15
@@ -330,7 +372,9 @@ def test_real_publisher_redis_celery_upload_job_succeeds(monkeypatch) -> None:
         connection.execute("DELETE FROM processing_jobs WHERE id=%s", (job_id,))
 
 
-def test_duplicate_real_redis_deliveries_are_safe_no_ops(monkeypatch, tmp_path) -> None:
+def test_duplicate_real_redis_deliveries_are_safe_no_ops(
+    monkeypatch, tmp_path, authenticated_backend_client
+) -> None:
     raw_url = "https://example.invalid/video?token=duplicate-secret"
     video = tmp_path / "source.mp4"
     video.write_bytes(b"test-safe-source-boundary")
@@ -348,7 +392,7 @@ def test_duplicate_real_redis_deliveries_are_safe_no_ops(monkeypatch, tmp_path) 
         )
 
     monkeypatch.setattr(tasks, "build_runner", build_test_runner)
-    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8000")
+    client, _user_id = authenticated_backend_client
     psycopg_url = settings.database_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
@@ -359,8 +403,8 @@ def test_duplicate_real_redis_deliveries_are_safe_no_ops(monkeypatch, tmp_path) 
         queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
-        response = httpx.post(
-            f"{backend_url}/api/v1/jobs/url",
+        response = client.post(
+            "/api/v1/jobs/url",
             headers={"Idempotency-Key": f"duplicate-e2e-{uuid4()}"},
             json={
                 "url": raw_url,
@@ -369,9 +413,10 @@ def test_duplicate_real_redis_deliveries_are_safe_no_ops(monkeypatch, tmp_path) 
                     "selection_window_seconds": 1,
                 },
             },
-            timeout=10,
         )
-        response.raise_for_status()
+        assert response.status_code == 202, (
+            f"URL submission expected HTTP 202, got {response.status_code}."
+        )
         job_id = UUID(response.json()["job_id"])
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -411,7 +456,7 @@ def test_duplicate_real_redis_deliveries_are_safe_no_ops(monkeypatch, tmp_path) 
 
 
 def test_real_celery_retry_exhaustion_fails_without_stranding(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, authenticated_backend_client
 ) -> None:
     raw_url = "https://example.invalid/video?token=retry-secret"
     video = tmp_path / "source.mp4"
@@ -432,7 +477,7 @@ def test_real_celery_retry_exhaustion_fails_without_stranding(
 
     monkeypatch.setattr(tasks, "build_runner", build_test_runner)
     monkeypatch.setattr(tasks.random, "uniform", lambda *_args: 0)
-    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8000")
+    client, _user_id = authenticated_backend_client
     psycopg_url = settings.database_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
@@ -443,8 +488,8 @@ def test_real_celery_retry_exhaustion_fails_without_stranding(
         queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
-        response = httpx.post(
-            f"{backend_url}/api/v1/jobs/url",
+        response = client.post(
+            "/api/v1/jobs/url",
             headers={"Idempotency-Key": f"retry-e2e-{uuid4()}"},
             json={
                 "url": raw_url,
@@ -453,9 +498,10 @@ def test_real_celery_retry_exhaustion_fails_without_stranding(
                     "selection_window_seconds": 1,
                 },
             },
-            timeout=10,
         )
-        response.raise_for_status()
+        assert response.status_code == 202, (
+            f"URL submission expected HTTP 202, got {response.status_code}."
+        )
         job_id = UUID(response.json()["job_id"])
         deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
@@ -484,7 +530,9 @@ def test_real_celery_retry_exhaustion_fails_without_stranding(
         connection.execute("DELETE FROM processing_jobs WHERE id=%s", (job_id,))
 
 
-def test_storage_outage_recovers_on_new_run(monkeypatch, tmp_path) -> None:
+def test_storage_outage_recovers_on_new_run(
+    monkeypatch, tmp_path, authenticated_backend_client
+) -> None:
     raw_url = "https://example.invalid/video?token=recovery-secret"
     video = tmp_path / "source.mp4"
     video.write_bytes(b"test-safe-source-boundary")
@@ -505,7 +553,7 @@ def test_storage_outage_recovers_on_new_run(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(tasks, "build_runner", build_test_runner)
     monkeypatch.setattr(tasks.random, "uniform", lambda *_args: 0)
-    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8000")
+    client, _user_id = authenticated_backend_client
     psycopg_url = settings.database_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
@@ -516,8 +564,8 @@ def test_storage_outage_recovers_on_new_run(monkeypatch, tmp_path) -> None:
         queues=(settings.task_queue,),
         perform_ping_check=False,
     ):
-        response = httpx.post(
-            f"{backend_url}/api/v1/jobs/url",
+        response = client.post(
+            "/api/v1/jobs/url",
             headers={"Idempotency-Key": f"storage-recovery-e2e-{uuid4()}"},
             json={
                 "url": raw_url,
@@ -526,9 +574,10 @@ def test_storage_outage_recovers_on_new_run(monkeypatch, tmp_path) -> None:
                     "selection_window_seconds": 1,
                 },
             },
-            timeout=10,
         )
-        response.raise_for_status()
+        assert response.status_code == 202, (
+            f"URL submission expected HTTP 202, got {response.status_code}."
+        )
         job_id = UUID(response.json()["job_id"])
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
