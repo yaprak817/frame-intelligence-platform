@@ -2,7 +2,9 @@
 
 This deployment targets one Ubuntu Docker host without depending on a cloud provider. Caddy is the only public entry point. It terminates HTTPS, redirects HTTP automatically, sends the application domain to the Next.js frontend, and sends the storage domain to private MinIO. The frontend retains the same-origin `/api/v1` proxy to the private backend.
 
-> Authentication and job ownership are not implemented. Do not expose this stack to the Internet until an explicit access policy, upstream authentication/WAF, abuse controls, upload quotas, and incident response ownership exist.
+> User authentication and resource ownership code was merged into `main` through PR #62. This describes repository code only; it does not confirm a production deployment. Verify the deployed revision before treating these controls as active in production.
+
+Set `APP_SITE` in `.env.production` to the application's canonical HTTPS public origin, such as `https://<application-hostname>` (use the real hostname only in the private environment file; do not include a port or path). Caddy uses `APP_SITE` for the application site, and `compose.production.yaml` derives the frontend `FRONTEND_PUBLIC_ORIGIN` from that same required variable. This keeps browser Origin/Referer checks aligned with the public site. If `APP_SITE` is missing or incorrect, browser mutation requests may be rejected with HTTP 403. The environment validator checks the HTTPS scheme and public DNS hostname format.
 
 The examples consistently use project `frame-intelligence-production`, `.env.production`, and `compose.production.yaml`. Do not omit these selectors or reuse them for a restore target.
 
@@ -12,6 +14,7 @@ Install a supported Docker Engine with Compose v2, configure separate applicatio
 
 ```sh
 sh deploy/scripts/validate-env.sh .env.production
+sh deploy/scripts/production-contract-smoke.sh
 docker compose --project-name frame-intelligence-production --env-file .env.production -f compose.production.yaml config --quiet
 docker compose --project-name frame-intelligence-production --env-file .env.production -f compose.production.yaml up -d --build --wait
 docker compose --project-name frame-intelligence-production --env-file .env.production -f compose.production.yaml ps
@@ -22,6 +25,8 @@ curl --fail --silent https://frames.example.com/api/v1/ready
 Caddy obtains and renews certificates in `caddy_data`; its config state is in `caddy_config`. Access logs are disabled because storage requests may contain presigned credentials in query strings. The upload proxy timeout defaults to 1800 seconds and is bounded to 60–7200 seconds with `UPLOAD_PROXY_TIMEOUT_SECONDS`; ordinary API calls retain their separate 1–300 second bounded timeout. Caddy allows 7230 seconds for an upload response and 330 seconds for other application responses, leaving a small cleanup margin beyond the corresponding maximum Next.js deadlines.
 
 ## Routine operations
+
+Before a production deployment that introduces authentication or ownership migrations, review their effects on existing data, create and verify an off-host backup, and confirm the rollback plan. Legacy records without a trustworthy owner are not automatically assigned to an arbitrary user; establish a verified ownership mapping or controlled remediation before relying on owner-scoped operations. Schema downgrade is not automatic, so use the documented isolated restore process if rollback requires data recovery.
 
 ```sh
 # Bounded logs

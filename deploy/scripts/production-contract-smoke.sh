@@ -46,6 +46,83 @@ for replacement in \
   fi
 done
 
+# Inspect only services.frontend.environment and require the exact fail-closed APP_SITE mapping.
+assert_frontend_public_origin_contract() {
+  awk '
+    /^services:[[:space:]]*$/ {
+      in_services = 1
+      next
+    }
+    /^[^[:space:]#][^:]*:/ {
+      in_services = 0
+      in_frontend = 0
+      in_environment = 0
+      next
+    }
+    in_services && /^  [^[:space:]][^:]*:[[:space:]]*$/ {
+      in_frontend = ($0 == "  frontend:")
+      in_environment = 0
+      next
+    }
+    in_frontend && /^    environment:[[:space:]]*$/ {
+      in_environment = 1
+      next
+    }
+    in_frontend && /^    [^[:space:]][^:]*:/ {
+      in_environment = 0
+      next
+    }
+    in_environment && /^      FRONTEND_PUBLIC_ORIGIN:/ {
+      count++
+      value = $0
+      sub(/^      FRONTEND_PUBLIC_ORIGIN:[[:space:]]*/, "", value)
+    }
+    END {
+      exit !(count == 1 && value == "${APP_SITE:?required}")
+    }
+  ' "$1"
+}
+
+if ! assert_frontend_public_origin_contract compose.production.yaml; then
+  echo "Production frontend must require FRONTEND_PUBLIC_ORIGIN from APP_SITE." >&2
+  exit 1
+fi
+
+origin_fixture="$root/frontend-origin-compose.yaml"
+for invalid_value in \
+  'https://fixed.example.invalid' \
+  '""' \
+  '"*"' \
+  '${APP_SITE}' \
+  '${APP_SITE:-https://fallback.example.invalid}' \
+  '${OTHER:?required}' \
+  ''; do
+  cat > "$origin_fixture" <<EOF
+services:
+  frontend:
+    environment:
+      FRONTEND_PUBLIC_ORIGIN: $invalid_value
+EOF
+  if assert_frontend_public_origin_contract "$origin_fixture"; then
+    echo "Invalid frontend public origin mapping was accepted: $invalid_value" >&2
+    exit 1
+  fi
+done
+
+cat > "$origin_fixture" <<'EOF'
+services:
+  proxy:
+    environment:
+      FRONTEND_PUBLIC_ORIGIN: ${APP_SITE:?required}
+  frontend:
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+EOF
+if assert_frontend_public_origin_contract "$origin_fixture"; then
+  echo "A public origin mapping outside frontend.environment was accepted." >&2
+  exit 1
+fi
+
 grep -Fq 'INTERNAL_PROXY_SHARED_SECRET: ${INTERNAL_PROXY_SHARED_SECRET:?required}' compose.production.yaml
 test "$(grep -F 'networks: [frontend-edge, application]' compose.production.yaml | wc -l | tr -d ' ')" = 1
 test "$(grep -F 'networks: [storage-edge, data]' compose.production.yaml | wc -l | tr -d ' ')" = 1
