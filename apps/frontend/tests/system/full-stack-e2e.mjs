@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../../../..");
@@ -34,6 +34,7 @@ function projectName() {
 
 function safeText(value) {
   return String(value)
+    .replace(/\b(authorization|cookie|set-cookie|password|passwd|token|secret)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n]*)/gi, "$1$2[REDACTED]")
     .replace(/([?&](?:x-amz-[^=&\s]+|signature|token|credential)=)[^&\s]+/gi, "$1[REDACTED]")
     .replace(/\bfile:\/\/\/[a-z]:\/[^\s"'<>|]+/gi, "[REDACTED]")
     .replace(/\b[a-z]:\\[^\r\n"'<>|]+/gi, "[REDACTED]")
@@ -61,6 +62,10 @@ function verifyRedaction() {
     "file:///C:/Users/Fixture/AppData/Local/Temp/frame-full-stack-e2e-fake/fixture.mp4",
     "/tmp/frame-full-stack-e2e-fake/fixture.mp4",
     "fake-signature",
+    "fixture-secret",
+    "fixture-cookie",
+    "fixture-token",
+    "fixture-password",
   ];
   const sample = [
     "frame-worker-1 | ready",
@@ -72,6 +77,9 @@ function verifyRedaction() {
     `file_uri=file:///C:/Users/Fixture/AppData/Local/Temp/frame-full-stack-e2e-fake/fixture.mp4`,
     `temporary=/tmp/frame-full-stack-e2e-fake/fixture.mp4`,
     `url=https://127.0.0.1:9000/frame.jpg?X-Amz-Signature=fake-signature`,
+    `Cookie: frame_session=fixture-cookie`,
+    `Authorization: Bearer fixture-token`,
+    `password=fixture-password secret=fixture-secret`,
   ].join("\n");
   const redacted = safeText(sample);
   if (sensitive.some((item) => redacted.includes(item))) throw new Error("Tanı redaksiyonu sahte hassas değeri maskelemedi.");
@@ -140,6 +148,51 @@ function verifySameOriginAssertion() {
   }
   if (!redirectClassified) throw new Error("Başlangıç navigation/redirect isteği ayrı sınıflandırılmadı.");
   console.log("Annotation same-origin assertion pozitif ve negatif örneklerle doğrulandı.");
+}
+
+async function assertAuthenticatedContext(context, baseUrl) {
+  const response = await context.request.get(`${baseUrl}/api/v1/auth/me`, { timeout: 30_000 });
+  if (response.status() !== 200) throw new Error(`E2E auth/me expected HTTP 200, got ${response.status()}.`);
+}
+
+async function registerE2EUser(context, baseUrl) {
+  const ready = await context.request.get(`${baseUrl}/api/v1/ready`, { timeout: 30_000 });
+  const readyBody = await ready.json();
+  if (!ready.ok() || readyBody?.status !== "ready") throw new Error("E2E backend was not ready before auth registration.");
+
+  const registration = await context.request.post(`${baseUrl}/api/v1/auth/register`, {
+    data: {
+      email: `e2e-${randomUUID()}@example.test`,
+      password: `E2E_${randomUUID()}_Only!`,
+    },
+    headers: {
+      origin: new URL(baseUrl).origin,
+      referer: `${baseUrl}/`,
+    },
+    timeout: 30_000,
+  });
+  if (registration.status() !== 201) throw new Error(`E2E auth/register expected HTTP 201, got ${registration.status()}.`);
+
+  const sessionCookie = (await context.cookies(baseUrl)).find((cookie) => cookie.name === "frame_session" && cookie.value.length > 0);
+  if (!sessionCookie) throw new Error("Register did not set a session cookie in the same browser context.");
+  await assertAuthenticatedContext(context, baseUrl);
+  return context.storageState();
+}
+
+async function assertNotLogin(page) {
+  if (new URL(page.url()).pathname === "/login") throw new Error("Protected E2E page redirected to /login.");
+}
+
+async function withAuthenticatedRequestContext(baseUrl, storageState, callback) {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ storageState });
+  try {
+    await assertAuthenticatedContext(context, baseUrl);
+    return await callback(context.request);
+  } finally {
+    await context.close();
+    await browser.close();
+  }
 }
 
 function run(command, args, { env, timeoutMs = 120_000, capture = true, allowFailure = false } = {}) {
@@ -286,14 +339,16 @@ async function inspectDatasetZip(path, mode) {
   return JSON.parse(result.stdout);
 }
 
-async function datasetBrowserFlow(baseUrl, paths, archive, temporaryDirectory, exhaustPreviewQuota = false) {
+async function datasetBrowserFlow(baseUrl, paths, archive, temporaryDirectory, storageState, exhaustPreviewQuota = false) {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ acceptDownloads: true });
+  const context = await browser.newContext({ acceptDownloads: true, storageState });
   const page = await context.newPage();
   const statuses = [];
   const exports = [];
   try {
+    await assertAuthenticatedContext(context, baseUrl);
     await page.goto(`${baseUrl}/jobs/new`, { waitUntil: "networkidle", timeout: 60_000 });
+    await assertNotLogin(page);
     await page.getByRole("tab", { name: "Görsel veri seti" }).click();
     if (archive) await page.getByRole("radio", { name: "ZIP arşivi" }).click();
     await page.locator(".drop-zone input[type=file]").setInputFiles(paths);
@@ -361,14 +416,16 @@ function assertExportManifestIsPublic(manifest, jobId) {
   }
 }
 
-async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeight) {
+async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeight, storageState) {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
+  const context = await browser.newContext({ storageState });
   const page = await context.newPage();
   const requested = [];
   let requestListener;
   try {
+    await assertAuthenticatedContext(context, baseUrl);
     await page.goto(`${baseUrl}/jobs/${jobId}/result`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await assertNotLogin(page);
     await page.waitForLoadState("networkidle", { timeout: 30_000 });
     requested.length = 0;
     let initialNavigationSeen = false;
@@ -439,74 +496,86 @@ async function annotationBrowserFlow(baseUrl, jobId, expectedWidth, expectedHeig
   }
 }
 
-async function trainingFlow(baseUrl, jobId, onRunning) {
-  const json = async (path, init = {}) => {
-    for (let attempt = 0; attempt <= 10; attempt += 1) {
-      const response = await fetch(`${baseUrl}${path}`, init);
-      const body = await response.json();
-      if (response.ok) return body;
-      if (response.status !== 429 || attempt === 10) throw new Error(`Training API ${response.status}.`);
-      const seconds = Number(response.headers.get("retry-after"));
-      const delay = Math.min(60, Math.max(1, Number.isSafeInteger(seconds) ? seconds : 1));
-      await new Promise((resolveWait) => setTimeout(resolveWait, delay * 1000));
-    }
-    throw new Error("Training API retry budget exhausted.");
-  };
-  const project = await json(`/api/v1/jobs/${jobId}/annotations?page=1&page_size=100`, { method: "POST" });
-  if (project.total_images !== 50 || project.images.length !== 50) throw new Error("Training snapshot image count invalid.");
-  const createdClass = await json(`/api/v1/jobs/${jobId}/annotations/classes`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ expected_revision: project.revision, name: "vehicle", color: "#3366FF" }),
-  });
-  const classId = createdClass.annotation_class.id;
-  let revision = createdClass.revision;
-  for (const [position, image] of project.images.entries()) {
-    const saved = await json(`/api/v1/jobs/${jobId}/annotations/images/${image.index}`, {
-      method: "PUT", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expected_revision: revision, completed: true, boxes: position === 49 ? [] : [{ id: globalThis.crypto.randomUUID(), class_id: classId, x_center: .5, y_center: .5, width: .5, height: .5 }] }),
+async function trainingFlow(baseUrl, jobId, storageState, onRunning) {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ storageState });
+  try {
+    await assertAuthenticatedContext(context, baseUrl);
+    const json = async (path, init = {}) => {
+      for (let attempt = 0; attempt <= 10; attempt += 1) {
+        const options = { method: init.method ?? "GET" };
+        if (init.headers) options.headers = init.headers;
+        if (init.body !== undefined) options.data = init.body;
+        const response = await context.request.fetch(`${baseUrl}${path}`, options);
+        const body = await response.json();
+        if (response.ok()) return body;
+        if (response.status() !== 429 || attempt === 10) throw new Error(`Training API ${response.status()}.`);
+        const seconds = Number(response.headers()["retry-after"]);
+        const delay = Math.min(60, Math.max(1, Number.isSafeInteger(seconds) ? seconds : 1));
+        await new Promise((resolveWait) => setTimeout(resolveWait, delay * 1000));
+      }
+      throw new Error("Training API retry budget exhausted.");
+    };
+    const project = await json(`/api/v1/jobs/${jobId}/annotations?page=1&page_size=100`, { method: "POST" });
+    if (project.total_images !== 50 || project.images.length !== 50) throw new Error("Training snapshot image count invalid.");
+    const createdClass = await json(`/api/v1/jobs/${jobId}/annotations/classes`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_revision: project.revision, name: "vehicle", color: "#3366FF" }),
     });
-    revision = saved.project_revision;
-  }
-  const created = await json(`/api/v1/jobs/${jobId}/annotations/trainings`, {
-    method: "POST", headers: { "content-type": "application/json", "idempotency-key": `e2e-training-${jobId}` },
-    body: JSON.stringify({ expected_revision: revision, config: { epochs: 1 } }),
-  });
-  if (created.status !== "SNAPSHOT_READY" || created.image_count !== 50 || created.validation_image_count < 1 || created.box_count !== 49 || created.config?.epochs !== 1) throw new Error("Training snapshot contract invalid.");
-  const started = await json(`${created.status_url}/start`, { method: "POST" });
-  if (started.status !== "PENDING") throw new Error("Training did not enter PENDING.");
-  const duplicateStart = await json(`${created.status_url}/start`, { method: "POST" });
-  if (duplicateStart.id !== created.id || !["PENDING", "RUNNING", "SUCCEEDED"].includes(duplicateStart.status)) throw new Error("Duplicate training start was not a no-op.");
-  const statuses = ["SNAPSHOT_READY", "PENDING"];
-  let previousProgress = 0;
-  let terminal;
-  let runningProbeStarted = false;
-  const deadline = Date.now() + TRAINING_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const current = await json(created.status_url);
-    if (current.progress_completed < previousProgress || current.progress_completed > current.progress_total) throw new Error("Training progress is not bounded and monotonic.");
-    previousProgress = current.progress_completed;
-    if (!statuses.includes(current.status)) statuses.push(current.status);
-    if (current.status === "RUNNING" && !runningProbeStarted && onRunning) {
-      runningProbeStarted = true;
-      await onRunning(created.status_url);
+    const classId = createdClass.annotation_class.id;
+    let revision = createdClass.revision;
+    for (const [position, image] of project.images.entries()) {
+      const saved = await json(`/api/v1/jobs/${jobId}/annotations/images/${image.index}`, {
+        method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expected_revision: revision, completed: true, boxes: position === 49 ? [] : [{ id: globalThis.crypto.randomUUID(), class_id: classId, x_center: .5, y_center: .5, width: .5, height: .5 }] }),
+      });
+      revision = saved.project_revision;
     }
-    if (TERMINAL.has(current.status)) { terminal = current; break; }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
+    const created = await json(`/api/v1/jobs/${jobId}/annotations/trainings`, {
+      method: "POST", headers: { "content-type": "application/json", "idempotency-key": `e2e-training-${jobId}` },
+      body: JSON.stringify({ expected_revision: revision, config: { epochs: 1 } }),
+    });
+    if (created.status !== "SNAPSHOT_READY" || created.image_count !== 50 || created.validation_image_count < 1 || created.box_count !== 49 || created.config?.epochs !== 1) throw new Error("Training snapshot contract invalid.");
+    const started = await json(`${created.status_url}/start`, { method: "POST" });
+    if (started.status !== "PENDING") throw new Error("Training did not enter PENDING.");
+    const duplicateStart = await json(`${created.status_url}/start`, { method: "POST" });
+    if (duplicateStart.id !== created.id || !["PENDING", "RUNNING", "SUCCEEDED"].includes(duplicateStart.status)) throw new Error("Duplicate training start was not a no-op.");
+    const statuses = ["SNAPSHOT_READY", "PENDING"];
+    let previousProgress = 0;
+    let terminal;
+    let runningProbeStarted = false;
+    const deadline = Date.now() + TRAINING_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const current = await json(created.status_url);
+      if (current.progress_completed < previousProgress || current.progress_completed > current.progress_total) throw new Error("Training progress is not bounded and monotonic.");
+      previousProgress = current.progress_completed;
+      if (!statuses.includes(current.status)) statuses.push(current.status);
+      if (current.status === "RUNNING" && !runningProbeStarted && onRunning) {
+        runningProbeStarted = true;
+        await onRunning(created.status_url, context.request);
+      }
+      if (TERMINAL.has(current.status)) { terminal = current; break; }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
+    }
+    if (terminal?.status !== "SUCCEEDED" || terminal.model_version !== 1 || terminal.progress_completed !== terminal.progress_total || !statuses.includes("RUNNING")) throw new Error(`Training terminal=${terminal?.status ?? "timeout"}.`);
+    const latest = await json(`/api/v1/jobs/${jobId}/annotations/models/latest`);
+    if (latest.training_id !== created.id || latest.model_version !== terminal.model_version) throw new Error("Latest model read-back is unstable.");
+    const snapshotUrl = new URL(terminal.snapshot_download_url, baseUrl).toString();
+    const snapshot = await context.request.get(snapshotUrl);
+    const snapshotBytes = await snapshot.body();
+    if (!snapshot.ok() || snapshotBytes.length < 1 || snapshot.headers()["content-type"] !== "application/zip") throw new Error("Snapshot download failed.");
+    const refreshed = await json(created.status_url);
+    if (refreshed.status !== "SUCCEEDED" || refreshed.model_version !== terminal.model_version) throw new Error("Training refresh persistence failed.");
+    return { statuses: statuses.join(" -> "), revision, modelVersion: terminal.model_version, snapshotBytes: snapshotBytes.length };
+  } finally {
+    await context.close();
+    await browser.close();
   }
-  if (terminal?.status !== "SUCCEEDED" || terminal.model_version !== 1 || terminal.progress_completed !== terminal.progress_total || !statuses.includes("RUNNING")) throw new Error(`Training terminal=${terminal?.status ?? "timeout"}.`);
-  const latest = await json(`/api/v1/jobs/${jobId}/annotations/models/latest`);
-  if (latest.training_id !== created.id || latest.model_version !== terminal.model_version) throw new Error("Latest model read-back is unstable.");
-  const snapshot = await fetch(`${baseUrl}${terminal.snapshot_download_url}`);
-  const snapshotBytes = new Uint8Array(await snapshot.arrayBuffer());
-  if (!snapshot.ok || snapshotBytes.length < 1 || snapshot.headers.get("content-type") !== "application/zip") throw new Error("Snapshot download failed.");
-  const refreshed = await json(created.status_url);
-  if (refreshed.status !== "SUCCEEDED" || refreshed.model_version !== terminal.model_version) throw new Error("Training refresh persistence failed.");
-  return { statuses: statuses.join(" -> "), revision, modelVersion: terminal.model_version, snapshotBytes: snapshotBytes.length };
 }
 
-async function browserFlow(baseUrl, videoPath, onVideoSucceeded) {
+async function browserFlow(baseUrl, videoPath, storageState, onVideoSucceeded) {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ acceptDownloads: true });
+  const context = await browser.newContext({ acceptDownloads: true, ...(storageState ? { storageState } : {}) });
   const page = await context.newPage();
   const statuses = [];
   let frameAccessCount = 0;
@@ -523,7 +592,10 @@ async function browserFlow(baseUrl, videoPath, onVideoSucceeded) {
     } catch { /* A malformed response is handled by the production UI. */ }
   });
   try {
+    const authState = storageState ?? await registerE2EUser(context, baseUrl);
+    await assertAuthenticatedContext(context, baseUrl);
     await page.goto(`${baseUrl}/jobs/new`, { waitUntil: "networkidle", timeout: 60_000 });
+    await assertNotLogin(page);
     await page.locator("#video-file").setInputFiles(videoPath);
     await page.locator("#candidate-fps").fill("4");
     await page.locator("#window-seconds").fill("1");
@@ -669,7 +741,7 @@ async function browserFlow(baseUrl, videoPath, onVideoSucceeded) {
     for (const [index, exported] of allZip.manifest.frames.entries()) {
       if (exported.index !== index || allZip.hashes[exported.filename] !== manifest.frames[index].sha256) throw new Error("Tüm-frame ZIP sıra/hash geçersiz.");
     }
-    return { statuses: statuses.join(" -> "), framesSaved, jobId, firstFrame: manifest.frames[0] };
+    return { statuses: statuses.join(" -> "), framesSaved, jobId, firstFrame: manifest.frames[0], storageState: authState };
   } finally {
     await context.close();
     await browser.close();
@@ -690,11 +762,14 @@ async function waitForService(project, env, service, expected = "healthy", timeo
   throw new Error(`${service} kontrollü restart sonrasında hazır olmadı.`);
 }
 
-async function verifyPersistedResultPage(baseUrl, jobId) {
+async function verifyPersistedResultPage(baseUrl, jobId, storageState) {
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const context = await browser.newContext({ storageState });
+  const page = await context.newPage();
   try {
+    await assertAuthenticatedContext(context, baseUrl);
     await page.goto(`${baseUrl}/jobs/${jobId}/result`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await assertNotLogin(page);
     await page.locator("#summary-title").waitFor({ state: "visible", timeout: 30_000 });
     const frameCard = page.locator(".frame-card").first();
     await frameCard.scrollIntoViewIfNeeded();
@@ -706,7 +781,7 @@ async function verifyPersistedResultPage(baseUrl, jobId) {
       node.addEventListener("error", () => rejectImage(new Error("Kalıcı frame görseli yüklenemedi.")), { once: true });
     }));
   } finally {
-    await page.close();
+    await context.close();
     await browser.close();
   }
 }
@@ -726,9 +801,12 @@ async function main() {
     ...process.env,
     FULL_STACK_E2E_FRONTEND_PORT: String(frontendPort),
     FULL_STACK_E2E_MINIO_PORT: String(minioPort),
+    FULL_STACK_E2E_PUBLIC_HOST: publicHost,
     POSTGRES_DB: `e2e_${project.slice(-18)}`,
     POSTGRES_USER: "e2e_fixture_user",
     POSTGRES_PASSWORD: fakePassword,
+    REDIS_URL: "redis://redis:6379/0",
+    CELERY_BROKER_URL: "redis://redis:6379/0",
     JOB_SOURCE_ENCRYPTION_KEY: Buffer.alloc(32, 37).toString("base64"),
     OBJECT_STORAGE_ACCESS_KEY: "e2e_fixture_access",
     OBJECT_STORAGE_SECRET_KEY: fakePassword,
@@ -747,6 +825,9 @@ async function main() {
   if (mode === "--diagnostics-only") return diagnostics(project, env);
   if (mode !== "run") throw new Error(`Bilinmeyen mod: ${mode}`);
 
+  await run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 30_000 });
+  const existingResources = await projectResources(project);
+  if (existingResources.length > 0) throw new Error("E2E Compose project already has Docker resources; refusing to reuse it.");
   const baseline = await baselineContainers();
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "issue42-phase4b-e2e-"));
   const videoPath = join(temporaryDirectory, "fixture.mp4");
@@ -764,7 +845,6 @@ async function main() {
   const globalTimer = setTimeout(() => { void emergencyCleanup(124); }, RUN_TIMEOUT_MS);
   const started = Date.now();
   try {
-    await run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 30_000 });
     await docker(project, env, ["config", "--quiet"], { timeoutMs: 30_000 });
     const upArguments = ["up", "-d"];
     if (!SKIP_BUILD) upArguments.push("--build");
@@ -782,6 +862,11 @@ async function main() {
       const migrationExit = await run("docker", ["inspect", "--format", "{{.State.ExitCode}}", migrateContainer], { timeoutMs: 30_000 });
       if (migrationExit.stdout !== "0") throw new Error(`Migration exit code 0 değil: ${migrationExit.stdout}`);
     }
+    const expectedPublicOrigin = `http://${publicHost}:${frontendPort}`;
+    const frontendOrigin = await docker(project, env, ["exec", "-T", "frontend", "node", "-e", "process.stdout.write(process.env.FRONTEND_PUBLIC_ORIGIN ?? '')"], { timeoutMs: 30_000 });
+    if (frontendOrigin.stdout !== expectedPublicOrigin) throw new Error("E2E frontend FRONTEND_PUBLIC_ORIGIN gerçekleÅŸen public origin ile eÅŸleÅŸmiyor.");
+    const backendTarget = await docker(project, env, ["exec", "-T", "backend", "python", "-c", "from sqlalchemy.engine import make_url; u=make_url(__import__('os').environ['DATABASE_URL']); print(f'{u.host}|{u.port}|{u.database}')"], { timeoutMs: 30_000 });
+    if (backendTarget.stdout !== `postgres|5432|${env.POSTGRES_DB}`) throw new Error("E2E backend is not connected to the project-scoped test PostgreSQL database.");
     const readiness = await fetch(`http://${publicHost}:${frontendPort}/api/v1/ready`);
     if (!readiness.ok || JSON.stringify(await readiness.json()) !== '{"status":"ready"}') throw new Error("Reverse proxy readiness tam ready cevabı üretmedi.");
     const worker = await docker(project, env, ["ps", "-q", "frame-worker"], { timeoutMs: 30_000 });
@@ -793,23 +878,25 @@ async function main() {
       await run("docker", ["cp", `${worker.stdout}:/tmp/e2e-image.${extension}`, imagePaths[index]], { timeoutMs: 30_000 });
     }
     await run("python", ["-c", "import os,sys,zipfile;z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED);[z.write(p,'safe/'+os.path.basename(p)) for p in sys.argv[2:]];z.close()", archivePath, ...imagePaths], { timeoutMs: 30_000 });
-    const result = await browserFlow(`http://${publicHost}:${frontendPort}`, videoPath);
+    const baseUrl = `http://${publicHost}:${frontendPort}`;
+    const result = await browserFlow(baseUrl, videoPath);
+    const authState = result.storageState;
     if (result.framesSaved !== 4) throw new Error(`Deterministik fixture tam 4 frame üretmedi: ${result.framesSaved}`);
     if (result.firstFrame.width !== 1138 || result.firstFrame.height !== 640 || Math.abs(result.firstFrame.width / result.firstFrame.height - 16 / 9) > 1 / result.firstFrame.height) throw new Error(`Production frame ölçüsü/oranı geçersiz: ${result.firstFrame.width}x${result.firstFrame.height}.`);
-    const videoAnnotation = await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, result.jobId, result.firstFrame.width, result.firstFrame.height);
-    const datasetSingle = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [imagePaths[0]], false, temporaryDirectory, true);
-    await annotationBrowserFlow(`http://${publicHost}:${frontendPort}`, datasetSingle.jobId, 640, 640);
-    const datasetMultiple = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, imagePaths, false, temporaryDirectory);
-    const datasetZip = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [archivePath], true, temporaryDirectory);
+    const videoAnnotation = await annotationBrowserFlow(baseUrl, result.jobId, result.firstFrame.width, result.firstFrame.height, authState);
+    const datasetSingle = await datasetBrowserFlow(baseUrl, [imagePaths[0]], false, temporaryDirectory, authState, true);
+    await annotationBrowserFlow(baseUrl, datasetSingle.jobId, 320, 180, authState);
+    const datasetMultiple = await datasetBrowserFlow(baseUrl, imagePaths, false, temporaryDirectory, authState);
+    const datasetZip = await datasetBrowserFlow(baseUrl, [archivePath], true, temporaryDirectory, authState);
     const trainingArchivePath = join(temporaryDirectory, "training-images.zip");
     await run("python", ["-c", "import sys,zipfile;data=open(sys.argv[2],'rb').read();z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED);[z.writestr(f'train/image_{i:06d}.jpg',data) for i in range(50)];z.close()", trainingArchivePath, imagePaths[0]], { timeoutMs: 30_000 });
-    const trainingDataset = await datasetBrowserFlow(`http://${publicHost}:${frontendPort}`, [trainingArchivePath], true, temporaryDirectory);
+    const trainingDataset = await datasetBrowserFlow(baseUrl, [trainingArchivePath], true, temporaryDirectory, authState);
     let concurrentVideo;
-    const training = await trainingFlow(`http://${publicHost}:${frontendPort}`, trainingDataset.jobId, async (statusUrl) => {
-      concurrentVideo = await browserFlow(`http://${publicHost}:${frontendPort}`, videoPath, async () => {
-        const response = await fetch(`http://${publicHost}:${frontendPort}${statusUrl}`);
+    const training = await trainingFlow(baseUrl, trainingDataset.jobId, authState, async (statusUrl, request) => {
+      concurrentVideo = await browserFlow(baseUrl, videoPath, authState, async () => {
+        const response = await request.get(`${baseUrl}${statusUrl}`);
         const body = await response.json();
-        const trainingStatus = response.ok && ["PENDING", "RUNNING", "SUCCEEDED", "FAILED"].includes(body.status) ? body.status : "UNKNOWN";
+        const trainingStatus = response.ok() && ["PENDING", "RUNNING", "SUCCEEDED", "FAILED"].includes(body.status) ? body.status : "UNKNOWN";
         if (trainingStatus !== "RUNNING") throw new Error(`Video=SUCCEEDED observed with training=${trainingStatus}; expected RUNNING.`);
       });
       if (!concurrentVideo || concurrentVideo.framesSaved !== 4) throw new Error("Video job did not succeed during ML training.");
@@ -840,27 +927,35 @@ async function main() {
       if (!postgresBefore || postgresAfter === postgresBefore || !minioBefore || minioAfter === minioBefore) {
         throw new Error("PostgreSQL veya MinIO kalıcılık testinde yeniden oluşturulmadı.");
       }
-      const persisted = await fetch(`http://${publicHost}:${frontendPort}/api/v1/jobs/${result.jobId}`);
-      const persistedBody = await persisted.json();
-      if (!persisted.ok || persistedBody?.status !== "SUCCEEDED") {
+      const persisted = await withAuthenticatedRequestContext(baseUrl, authState, async (request) => {
+        const response = await request.get(`${baseUrl}/api/v1/jobs/${result.jobId}`);
+        return { ok: response.ok(), body: await response.json() };
+      });
+      if (!persisted.ok || persisted.body?.status !== "SUCCEEDED") {
         throw new Error("PostgreSQL kalıcılığı kontrollü restart sonrasında doğrulanamadı.");
       }
-      const resultResponse = await fetch(`http://${publicHost}:${frontendPort}/api/v1/jobs/${result.jobId}/result`);
-      const resultBody = await resultResponse.json();
-      if (!resultResponse.ok || !Array.isArray(resultBody?.frames) || resultBody.frames.length < 1) {
+      const resultResponse = await withAuthenticatedRequestContext(baseUrl, authState, async (request) => {
+        const response = await request.get(`${baseUrl}/api/v1/jobs/${result.jobId}/result`);
+        return { ok: response.ok(), body: await response.json() };
+      });
+      if (!resultResponse.ok || !Array.isArray(resultResponse.body?.frames) || resultResponse.body.frames.length < 1) {
         throw new Error("MinIO kalıcılığı kontrollü restart sonrasında doğrulanamadı.");
       }
-      await verifyPersistedResultPage(`http://${publicHost}:${frontendPort}`, result.jobId);
-      const manifestResponse = await fetch(`http://${publicHost}:${frontendPort}/api/v1/jobs/${result.jobId}/result/manifest`);
-      const manifest = await manifestResponse.json();
-      if (!manifestResponse.ok || !manifestIsPublic(manifest, result.jobId)) {
+      await verifyPersistedResultPage(baseUrl, result.jobId, authState);
+      const manifestResponse = await withAuthenticatedRequestContext(baseUrl, authState, async (request) => {
+        const response = await request.get(`${baseUrl}/api/v1/jobs/${result.jobId}/result/manifest`);
+        return { ok: response.ok(), body: await response.json() };
+      });
+      if (!manifestResponse.ok || !manifestIsPublic(manifestResponse.body, result.jobId)) {
         throw new Error("Restart sonrası kalıcı manifest doğrulanamadı.");
       }
     }
     if (PRODUCTION_E2E) {
-      const persistedTraining = await fetch(`http://${publicHost}:${frontendPort}/api/v1/jobs/${trainingDataset.jobId}/annotations/models/latest`);
-      const persistedTrainingBody = await persistedTraining.json();
-      if (!persistedTraining.ok || persistedTrainingBody?.model_version !== training.modelVersion) throw new Error("Training/model persistence restart verification failed.");
+      const persistedTraining = await withAuthenticatedRequestContext(baseUrl, authState, async (request) => {
+        const response = await request.get(`${baseUrl}/api/v1/jobs/${trainingDataset.jobId}/annotations/models/latest`);
+        return { ok: response.ok(), body: await response.json() };
+      });
+      if (!persistedTraining.ok || persistedTraining.body?.model_version !== training.modelVersion) throw new Error("Training/model persistence restart verification failed.");
     }
     const persistedAnnotation = await docker(project, env, ["exec", "-T", "postgres", "psql", "-U", env.POSTGRES_USER, "-d", env.POSTGRES_DB, "-At", "-c", `SELECT i.completed::text || '|' || count(b.id)::text || '|' || min(b.x_center)::text || '|' || min(b.y_center)::text || '|' || min(b.width)::text || '|' || min(b.height)::text FROM annotation_images i JOIN annotation_projects p ON p.id=i.project_id LEFT JOIN annotation_boxes b ON b.project_id=i.project_id AND b.image_index=i.image_index WHERE p.job_id='${result.jobId}' AND i.image_index=0 GROUP BY i.completed;`], { timeoutMs: 30_000 });
     const persistedParts = persistedAnnotation.stdout.split("|");

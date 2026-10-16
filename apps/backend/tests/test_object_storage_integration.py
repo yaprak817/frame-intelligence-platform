@@ -12,8 +12,6 @@ import pytest
 from botocore.config import Config
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_job_service
-from app.main import app
 from app.storage.s3 import S3ResultObjectStorage
 
 pytest_plugins = ("pytester",)
@@ -32,6 +30,8 @@ class IntegrationCleanupError(RuntimeError):
 
 @dataclass
 class UploadCleanupResources:
+    api_client: TestClient
+    user_id: UUID
     s3: Any | None = None
     body: Any | None = None
     bucket: str = ""
@@ -105,8 +105,9 @@ def _cleanup_result_resources(resources: ResultCleanupResources) -> None:
 
 
 @pytest.fixture
-def upload_cleanup_resources():
-    resources = UploadCleanupResources()
+def upload_cleanup_resources(real_authenticated_client):
+    api_client, user_id = real_authenticated_client
+    resources = UploadCleanupResources(api_client=api_client, user_id=user_id)
     yield resources
     if resources.s3 is not None:
         _cleanup_upload_resources(
@@ -150,33 +151,30 @@ def test_upload_persists_real_object_job_and_outbox(upload_cleanup_resources) ->
 
     content = b"deterministic-small-video-fixture"
     key = f"integration-upload-{uuid4()}"
-    app.dependency_overrides.pop(get_job_service, None)
-    with TestClient(
-        app, backend_options={"loop_factory": asyncio.SelectorEventLoop}
-    ) as client:
-        response = client.post(
-            "/api/v1/jobs/upload",
-            headers={"Idempotency-Key": key},
-            files={"file": ("clip.mp4", content, "video/mp4")},
-        )
-        if response.status_code == 202:
-            upload_cleanup_resources.job_id = UUID(response.json()["job_id"])
-            upload_cleanup_resources.object_keys.add(
-                f"jobs/{upload_cleanup_resources.job_id}/source/original.mp4"
-            )
-        assert response.status_code == 202
-        assert "credential" not in response.text.lower()
+    response = upload_cleanup_resources.api_client.post(
+        "/api/v1/jobs/upload",
+        headers={"Idempotency-Key": key},
+        files={"file": ("clip.mp4", content, "video/mp4")},
+    )
+    assert response.status_code == 202, (
+        f"Upload submission expected HTTP 202, got {response.status_code}."
+    )
+    upload_cleanup_resources.job_id = UUID(response.json()["job_id"])
+    upload_cleanup_resources.object_keys.add(
+        f"jobs/{upload_cleanup_resources.job_id}/source/original.mp4"
+    )
+    assert "credential" not in response.text.lower()
 
     job_id = upload_cleanup_resources.job_id
     assert job_id is not None
     with psycopg.connect(database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT source_secret, source_reference "
+                "SELECT owner_user_id, source_secret, source_reference "
                 "FROM processing_jobs WHERE id=%s",
                 (job_id,),
             )
-            source_secret, reference = cursor.fetchone()
+            owner_user_id, source_secret, reference = cursor.fetchone()
             upload_cleanup_resources.object_keys.add(reference["object_key"])
             cursor.execute(
                 "SELECT payload FROM job_outbox WHERE aggregate_id=%s", (job_id,)
@@ -185,6 +183,7 @@ def test_upload_persists_real_object_job_and_outbox(upload_cleanup_resources) ->
     body = s3.get_object(Bucket=bucket, Key=reference["object_key"])["Body"]
     upload_cleanup_resources.body = body
     assert body.read() == content
+    assert owner_user_id == upload_cleanup_resources.user_id
     assert source_secret is None
     assert reference["object_key"].startswith(f"jobs/{job_id}/source/")
     assert reference["size_bytes"] == len(content)

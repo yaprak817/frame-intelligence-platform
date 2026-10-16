@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     rate_limit_annotation_snapshot_requests: int = 5
     annotation_training_max_snapshots_per_project: int = 5
     annotation_max_payload_bytes: int = 256 * 1024
+    auth_session_ttl_seconds: int = 7 * 24 * 60 * 60
+    rate_limit_auth_requests: int = 10
     rate_limit_window_seconds: int = 60
     dependency_timeout_seconds: float = 2.0
     outbox_poll_interval_seconds: float = 1.0
@@ -204,6 +206,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "TRUSTED_PROXY_CIDRS contains an invalid network"
                 ) from error
+        if not 300 <= self.auth_session_ttl_seconds <= 30 * 24 * 60 * 60:
+            raise ValueError("AUTH_SESSION_TTL_SECONDS must be between 300 and 2592000")
+        if not 1 <= self.rate_limit_auth_requests <= 10_000:
+            raise ValueError("RATE_LIMIT_AUTH_REQUESTS must be between 1 and 10000")
         if not 1 <= self.rate_limit_submission_requests <= 10_000:
             raise ValueError(
                 "RATE_LIMIT_SUBMISSION_REQUESTS must be between 1 and 10000"

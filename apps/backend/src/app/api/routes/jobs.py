@@ -20,6 +20,7 @@ from pydantic import TypeAdapter, ValidationError
 from starlette.responses import StreamingResponse
 
 from app.api.dependencies import (
+    CurrentUserDependency,
     authorize_result_access,
     get_frame_export_service,
     get_job_service,
@@ -101,6 +102,7 @@ async def create_url_job(
     request: URLJobRequest,
     response: Response,
     service: JobServiceDependency,
+    current_user: CurrentUserDependency,
     idempotency_key_header: Annotated[
         str | None, Header(alias="Idempotency-Key")
     ] = None,
@@ -108,7 +110,10 @@ async def create_url_job(
     idempotency_key = _idempotency_key(idempotency_key_header)
     try:
         job, _created = await service.create_url_job(
-            request.url, request.processing, idempotency_key
+            request.url,
+            request.processing,
+            idempotency_key,
+            owner_user_id=current_user.id,
         )
     except IdempotencyConflictError as error:
         raise HTTPException(
@@ -133,6 +138,7 @@ async def create_url_job(
 async def create_upload_job(
     response: Response,
     service: JobServiceDependency,
+    current_user: CurrentUserDependency,
     file: Annotated[UploadFile, File()],
     candidate_fps: Annotated[float, Form(gt=0, le=60)] = 5.0,
     selection_window_seconds: Annotated[float, Form(gt=0, le=3600)] = 1.0,
@@ -152,6 +158,7 @@ async def create_upload_job(
                 selection_window_seconds=selection_window_seconds,
             ),
             key,
+            owner_user_id=current_user.id,
         )
     except UnsupportedUploadError as error:
         raise HTTPException(status_code=415, detail=str(error)) from error
@@ -183,6 +190,7 @@ async def create_upload_job(
 async def create_image_dataset_job(
     response: Response,
     service: JobServiceDependency,
+    current_user: CurrentUserDependency,
     files: Annotated[list[UploadFile] | None, File()] = None,
     archive: Annotated[UploadFile | None, File()] = None,
     idempotency_key_header: Annotated[
@@ -212,6 +220,7 @@ async def create_image_dataset_job(
             [item.size for item in selected],
             archive=archive_mode,
             idempotency_key=key,
+            owner_user_id=current_user.id,
         )
     except UnsupportedUploadError as error:
         raise HTTPException(status_code=415, detail=str(error)) from error
@@ -241,10 +250,13 @@ async def create_image_dataset_job(
 async def get_job(
     job_id: str,
     service: JobServiceDependency,
+    current_user: CurrentUserDependency,
 ) -> JobStatusResponse:
     try:
         parsed_id = UUID(job_id)
         job = await service.get_job(parsed_id)
+        if job.owner_user_id != current_user.id:
+            raise JobNotFoundError
     except (ValueError, JobNotFoundError) as error:
         raise _api_error(404, "JOB_NOT_FOUND", "Job not found") from error
     return _status_response(job)

@@ -15,6 +15,7 @@ from app.models.annotations import (
     AnnotationImage,
     AnnotationProject,
 )
+from app.models.auth import User, UserSession
 from app.models.brands import Brand, BrandClass, BrandDataset
 from app.models.frame_export import FrameExport, FrameExportOutbox
 from app.models.job_outbox import JobOutbox
@@ -39,4 +40,6 @@ __all__ = [
     "FrameExportOutbox",
     "JobOutbox",
     "ProcessingJob",
+    "User",
+    "UserSession",
 ]

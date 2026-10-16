@@ -5,6 +5,8 @@ services:
     restart: "no"
 
   frontend:
+    environment:
+      FRONTEND_PUBLIC_ORIGIN: "http://${FULL_STACK_E2E_PUBLIC_HOST:-127.0.0.1}:${FULL_STACK_E2E_FRONTEND_PORT}"
     restart: "no"
 
   migrate:

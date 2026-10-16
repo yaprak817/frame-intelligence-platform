@@ -10,11 +10,19 @@ from app.db.base import Base
 class Brand(Base):
     __tablename__ = "brands"
     __table_args__ = (
-        UniqueConstraint("normalized_name", name="uq_brands_normalized_name"),
+        UniqueConstraint(
+            "owner_user_id",
+            "normalized_name",
+            name="uq_brands_owner_normalized_name",
+        ),
         Index("ix_brands_updated_at", "updated_at"),
+        Index("ix_brands_owner_updated_at", "owner_user_id", "updated_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     normalized_name: Mapped[str] = mapped_column(String(120), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")

@@ -153,6 +153,12 @@ def _forwarded_client(
     return None
 
 
+_AUTH_PATHS = {
+    "/api/v1/auth/login",
+    "/api/v1/auth/register",
+}
+
+
 _RESULT_PATHS = (
     ("GET", re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result$")),
     ("GET", re.compile(r"^/api/v1/jobs/[0-9a-fA-F-]{36}/result/manifest$")),
@@ -201,6 +207,8 @@ _TRAINING_START_PATH = re.compile(
 
 
 def protected_group(method: str, path: str) -> tuple[str, str] | None:
+    if method == "POST" and path in _AUTH_PATHS:
+        return "auth", "rate_limit_auth_requests"
     if method == "POST" and _TRAINING_START_PATH.fullmatch(path):
         return "annotation-snapshot", "rate_limit_annotation_snapshot_requests"
     if _BRAND_PATH.fullmatch(path) or _AUTO_LABEL_PATH.fullmatch(path):

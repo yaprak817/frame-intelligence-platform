@@ -16,6 +16,7 @@ from test_annotation_migration import remove_annotation_project, seed_annotation
 
 from app.api.routes.brands import attach_brand_dataset
 from app.models.annotations import AnnotationBox, AnnotationClass, AnnotationProject
+from app.models.auth import User
 from app.models.brands import Brand, BrandDataset
 from app.schemas.brands import BrandDatasetAttach
 from app.services.annotations import AnnotationBrandConflict, AnnotationService
@@ -33,12 +34,36 @@ async def exercise_ownership(job_id, project_id):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     first, second = uuid4(), uuid4()
+    owner_user_id = uuid4()
+    current_user = SimpleNamespace(id=owner_user_id)
+
     try:
         async with sessions() as session:
+            session.add(
+                User(
+                    id=owner_user_id,
+                    email=f"{owner_user_id}@example.test",
+                    password_hash="integration-test-only",
+                    is_active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            job = await session.get(
+                __import__(
+                    "app.models.processing_job",
+                    fromlist=["ProcessingJob"],
+                ).ProcessingJob,
+                job_id,
+            )
+            assert job is not None
+            job.owner_user_id = owner_user_id
+
             for brand_id in (first, second):
                 session.add(
                     Brand(
                         id=brand_id,
+                        owner_user_id=owner_user_id,
                         name=str(brand_id),
                         normalized_name=str(brand_id),
                         status="DRAFT",
@@ -53,11 +78,13 @@ async def exercise_ownership(job_id, project_id):
                 first,
                 BrandDatasetAttach(name="frames", job_id=job_id),
                 session,
+                current_user,
             )
             again = await attach_brand_dataset(
                 first,
                 BrandDatasetAttach(name="frames again", job_id=job_id),
                 session,
+                current_user,
             )
             assert attached.id == again.id
 
@@ -127,6 +154,7 @@ async def exercise_ownership(job_id, project_id):
                     second,
                     BrandDatasetAttach(name="stolen", job_id=job_id),
                     session,
+                    current_user,
                 )
             assert error.value.status_code == 409
             with pytest.raises(HTTPException) as cross_project:
@@ -134,6 +162,7 @@ async def exercise_ownership(job_id, project_id):
                     second,
                     BrandDatasetAttach(name="stolen", annotation_project_id=project_id),
                     session,
+                    current_user,
                 )
             assert cross_project.value.status_code == 409
 
@@ -170,6 +199,7 @@ async def exercise_ownership(job_id, project_id):
                         brand_id,
                         BrandDatasetAttach(name="race", job_id=job_id),
                         session,
+                        current_user,
                     )
                     await AnnotationService(session, Results()).get_or_create_brand(
                         brand_id
@@ -197,6 +227,19 @@ async def exercise_ownership(job_id, project_id):
             if project is not None:
                 project.brand_id = None
             await session.execute(sa.delete(Brand).where(Brand.id.in_((first, second))))
+
+            job = await session.get(
+                __import__(
+                    "app.models.processing_job",
+                    fromlist=["ProcessingJob"],
+                ).ProcessingJob,
+                job_id,
+            )
+            if job is not None:
+                job.owner_user_id = None
+                await session.flush()
+
+            await session.execute(sa.delete(User).where(User.id == owner_user_id))
             await session.commit()
         await engine.dispose()
 

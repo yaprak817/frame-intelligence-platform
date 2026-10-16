@@ -12,11 +12,188 @@ const HMAC_VECTOR_EXPECTED = "d513dd72d0b92b859e2130ba7c5d6cd3b9ebf8ce894cb1aa0d
 describe("streaming API route proxy", () => {
   afterEach(() => {
     delete process.env.BACKEND_INTERNAL_URL;
+    delete process.env.FRONTEND_PUBLIC_ORIGIN;
     delete process.env.API_PROXY_TIMEOUT_SECONDS;
     delete process.env.UPLOAD_PROXY_TIMEOUT_SECONDS;
     delete process.env.INTERNAL_PROXY_SHARED_SECRET;
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+
+  it("rejects cross-origin browser mutations before forwarding", async () => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    process.env.FRONTEND_PUBLIC_ORIGIN = "http://localhost:13000";
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const request = new NextRequest(
+      "http://frontend/api/v1/auth/login",
+      {
+        method: "POST",
+        headers: {
+          Host: "localhost:13000",
+          Origin: "https://evil.example",
+          "X-Forwarded-Host": "evil.example",
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      },
+    );
+
+    const response = await POST(
+      request,
+      context(["auth", "login"]),
+    );
+
+    expect(response.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("accepts the configured public origin when Next uses an internal URL", async () => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    process.env.FRONTEND_PUBLIC_ORIGIN = "http://localhost:13000";
+    const upstream = vi.fn().mockResolvedValue(new Response("{}", { status: 201 }));
+    vi.stubGlobal("fetch", upstream);
+
+    const request = new NextRequest("http://0.0.0.0/api/v1/auth/register", {
+      method: "POST",
+      headers: {
+        Host: "localhost:13000",
+        Origin: "http://localhost:13000",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+
+    const response = await POST(request, context(["auth", "register"]));
+
+    expect(response.status).toBe(201);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("accepts an allowed Referer when Origin is absent", async () => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    process.env.FRONTEND_PUBLIC_ORIGIN = "http://localhost:13000";
+    const upstream = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await POST(new NextRequest("http://frontend/api/v1/auth/login", {
+      method: "POST",
+      headers: { Host: "localhost:13000", Referer: "http://localhost:13000/login?next=%2Fbrands" },
+      body: "{}",
+    }), context(["auth", "login"]));
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["foreign Origin", "http://localhost:13000", "https://evil.example", undefined],
+    ["unlisted Host with matching Origin", "evil.example", "http://evil.example", undefined],
+    ["allowed Origin with a different Host", "evil.example", "http://localhost:13000", undefined],
+    ["spoofed X-Forwarded-Host", "evil.example", "http://evil.example", "localhost:13000"],
+  ] as const)("rejects %s before forwarding", async (_label, host, origin, forwardedHost) => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    process.env.FRONTEND_PUBLIC_ORIGIN = "http://localhost:13000";
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    const headers = new Headers({ Host: host, Origin: origin });
+    if (forwardedHost) headers.set("X-Forwarded-Host", forwardedHost);
+
+    const response = await POST(new NextRequest("http://internal/api/v1/auth/login", {
+      method: "POST",
+      headers,
+      body: "{}",
+    }), context(["auth", "login"]));
+
+    expect(response.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("does not use an untrusted X-Forwarded-Proto for origin validation", async () => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    process.env.FRONTEND_PUBLIC_ORIGIN = "https://app.example.test";
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await POST(new NextRequest("http://internal/api/v1/auth/login", {
+      method: "POST",
+      headers: {
+        Host: "app.example.test",
+        Origin: "http://app.example.test",
+        "X-Forwarded-Proto": "http",
+      },
+      body: "{}",
+    }), context(["auth", "login"]));
+
+    expect(response.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "*", "https://user@app.example.test", "https://app.example.test/path"])(
+    "fails closed for invalid or missing FRONTEND_PUBLIC_ORIGIN (%s)",
+    async (publicOrigin) => {
+      process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+      if (publicOrigin === undefined) delete process.env.FRONTEND_PUBLIC_ORIGIN;
+      else process.env.FRONTEND_PUBLIC_ORIGIN = publicOrigin;
+      const upstream = vi.fn();
+      vi.stubGlobal("fetch", upstream);
+
+      for (const headers of [
+        new Headers({ Host: "localhost:13000", Origin: "http://localhost:13000" }),
+        new Headers({ Host: "localhost:13000", Referer: "http://localhost:13000/login" }),
+      ]) {
+        const response = await POST(new NextRequest("http://localhost:13000/api/v1/auth/login", {
+          method: "POST",
+          headers,
+          body: "{}",
+        }), context(["auth", "login"]));
+
+        expect(response.status).toBe(403);
+      }
+      expect(upstream).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["malformed Origin", "not an origin", undefined],
+    ["empty Origin", "", undefined],
+    ["Origin with a path", "http://localhost:13000/extra", undefined],
+    ["malformed Referer", undefined, "not a URL"],
+    ["empty Referer", undefined, ""],
+  ] as const)("rejects %s", async (_label, origin, referer) => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    process.env.FRONTEND_PUBLIC_ORIGIN = "http://localhost:13000";
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    const headers = new Headers({ Host: "localhost:13000" });
+    if (origin !== undefined) headers.set("Origin", origin);
+    if (referer !== undefined) headers.set("Referer", referer);
+
+    const response = await POST(new NextRequest("http://internal/api/v1/auth/login", {
+      method: "POST",
+      headers,
+      body: "{}",
+    }), context(["auth", "login"]));
+
+    expect(response.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("preserves the no-Origin/no-Referer non-browser client exception", async () => {
+    process.env.BACKEND_INTERNAL_URL = "http://backend:8000";
+    const upstream = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await POST(new NextRequest("http://internal/api/v1/auth/login", {
+      method: "POST",
+      headers: { Host: "untrusted.example" },
+      body: "{}",
+    }), context(["auth", "login"]));
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledOnce();
   });
 
   it.each([["PUT", PUT], ["PATCH", PATCH], ["DELETE", DELETE]] as const)("forwards annotation %s mutations", async (method, handler) => {
@@ -104,6 +281,7 @@ describe("streaming API route proxy", () => {
       accept: "application/json",
       "content-length": "5",
       "content-type": "video/mp4",
+      cookie: "session=secret",
       "idempotency-key": "web-request-1",
     });
     expect(init.body).toBe(request.body);

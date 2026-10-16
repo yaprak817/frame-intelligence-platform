@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
+from app.api.dependencies import get_current_user
 from app.api.routes.brands import (
     attach_brand_dataset,
     create_brand,
@@ -19,12 +20,17 @@ from app.db.session import get_session
 from app.main import app
 from app.models.annotations import AnnotationProject
 from app.models.brands import Brand, BrandDataset
+from app.models.processing_job import ProcessingJob
 from app.schemas.brands import BrandClassCreate, BrandCreate, BrandDatasetAttach
 from app.services.annotation_training import (
     AnnotationTrainingService,
     AnnotationTrainingSourceChanged,
 )
 from app.services.annotations import AnnotationLimitExceeded, AnnotationService
+
+USER_ID = uuid4()
+OTHER_USER_ID = uuid4()
+CURRENT_USER = SimpleNamespace(id=USER_ID, email="user@example.com")
 
 
 class Rows:
@@ -47,6 +53,8 @@ class Session:
     async def get(self, model, identifier):
         if model is Brand and self.brand and self.brand.id == identifier:
             return self.brand
+        if model is ProcessingJob:
+            return SimpleNamespace(id=identifier, owner_user_id=USER_ID)
         if (
             model is AnnotationProject
             and self.project
@@ -83,6 +91,7 @@ def sample_brand():
     now = datetime.now(UTC)
     return Brand(
         id=uuid4(),
+        owner_user_id=USER_ID,
         name="One",
         normalized_name="one",
         status="DRAFT",
@@ -93,8 +102,11 @@ def sample_brand():
 
 def test_brand_create_list_and_detail_are_public_safe():
     session = Session()
-    created = asyncio.run(create_brand(BrandCreate(name="  Example  "), session))
+    created = asyncio.run(
+        create_brand(BrandCreate(name="  Example  "), session, CURRENT_USER)
+    )
     assert created.name == "Example"
+    assert session.added[0].owner_user_id == USER_ID
     assert created.class_count == created.dataset_count == 0
     assert set(created.model_dump()) == {
         "id",
@@ -104,18 +116,34 @@ def test_brand_create_list_and_detail_are_public_safe():
         "dataset_count",
         "updated_at",
     }
-    assert asyncio.run(list_brands(limit=10, offset=0, session=session)) == []
+    assert (
+        asyncio.run(
+            list_brands(
+                limit=10,
+                offset=0,
+                session=session,
+                current_user=CURRENT_USER,
+            )
+        )
+        == []
+    )
     brand = sample_brand()
     detail = asyncio.run(
-        get_brand(brand.id, class_limit=10, dataset_limit=10, session=Session(brand))
+        get_brand(
+            brand.id,
+            class_limit=10,
+            dataset_limit=10,
+            session=Session(brand),
+            current_user=CURRENT_USER,
+        )
     )
     assert detail.id == brand.id and detail.classes == detail.datasets == []
 
 
 def test_duplicate_brand_rolls_back():
-    session = Session(fail_commit=True, constraint="uq_brands_normalized_name")
+    session = Session(fail_commit=True, constraint="uq_brands_owner_normalized_name")
     with pytest.raises(HTTPException) as error:
-        asyncio.run(create_brand(BrandCreate(name="Example"), session))
+        asyncio.run(create_brand(BrandCreate(name="Example"), session, CURRENT_USER))
     assert error.value.status_code == 409
     assert session.rollbacks == 1
 
@@ -128,7 +156,10 @@ def test_duplicate_class_and_dataset_roll_back():
     with pytest.raises(HTTPException) as class_error:
         asyncio.run(
             create_brand_class(
-                brand.id, BrandClassCreate(name="Vehicle"), class_session
+                brand.id,
+                BrandClassCreate(name="Vehicle"),
+                class_session,
+                CURRENT_USER,
             )
         )
     assert class_error.value.status_code == 409
@@ -143,6 +174,7 @@ def test_duplicate_class_and_dataset_roll_back():
                 brand.id,
                 BrandDatasetAttach(name="Frames", job_id=uuid4()),
                 dataset_session,
+                CURRENT_USER,
             )
         )
     assert dataset_error.value.status_code == 409
@@ -152,8 +184,26 @@ def test_duplicate_class_and_dataset_roll_back():
 def test_unrelated_integrity_error_is_not_mapped_to_conflict():
     session = Session(fail_commit=True, constraint="unexpected_foreign_key")
     with pytest.raises(IntegrityError):
-        asyncio.run(create_brand(BrandCreate(name="Example"), session))
+        asyncio.run(create_brand(BrandCreate(name="Example"), session, CURRENT_USER))
     assert session.rollbacks == 1
+
+
+def test_other_users_brand_is_hidden():
+    brand = sample_brand()
+    brand.owner_user_id = OTHER_USER_ID
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            get_brand(
+                brand.id,
+                class_limit=10,
+                dataset_limit=10,
+                session=Session(brand),
+                current_user=CURRENT_USER,
+            )
+        )
+
+    assert error.value.status_code == 404
 
 
 def test_brand_collection_caps_reject_new_class_and_dataset():
@@ -166,13 +216,18 @@ def test_brand_collection_caps_reject_new_class_and_dataset():
     session = FullSession(brand)
     with pytest.raises(HTTPException) as class_error:
         asyncio.run(
-            create_brand_class(brand.id, BrandClassCreate(name="Vehicle"), session)
+            create_brand_class(
+                brand.id, BrandClassCreate(name="Vehicle"), session, CURRENT_USER
+            )
         )
     assert class_error.value.status_code == 409
     with pytest.raises(HTTPException) as dataset_error:
         asyncio.run(
             attach_brand_dataset(
-                brand.id, BrandDatasetAttach(name="Frames", job_id=uuid4()), session
+                brand.id,
+                BrandDatasetAttach(name="Frames", job_id=uuid4()),
+                session,
+                CURRENT_USER,
             )
         )
     assert dataset_error.value.status_code == 409
@@ -196,13 +251,13 @@ def test_cross_brand_project_and_job_mismatch_cannot_attach():
         name="Dataset", job_id=project.job_id, annotation_project_id=project.id
     )
     with pytest.raises(HTTPException) as error:
-        asyncio.run(attach_brand_dataset(own_brand.id, payload, session))
+        asyncio.run(attach_brand_dataset(own_brand.id, payload, session, CURRENT_USER))
     assert error.value.status_code == 409
     assert session.added == []
     project.brand_id = own_brand.id
     payload.job_id = uuid4()
     with pytest.raises(HTTPException) as error:
-        asyncio.run(attach_brand_dataset(own_brand.id, payload, session))
+        asyncio.run(attach_brand_dataset(own_brand.id, payload, session, CURRENT_USER))
     assert error.value.status_code == 409
 
 
@@ -211,7 +266,12 @@ def test_dataset_requires_source_and_derives_project_job():
     session = Session(brand)
     with pytest.raises(HTTPException) as error:
         asyncio.run(
-            attach_brand_dataset(brand.id, BrandDatasetAttach(name="Empty"), session)
+            attach_brand_dataset(
+                brand.id,
+                BrandDatasetAttach(name="Empty"),
+                session,
+                CURRENT_USER,
+            )
         )
     assert error.value.status_code == 422
 
@@ -230,6 +290,7 @@ def test_dataset_requires_source_and_derives_project_job():
             brand.id,
             BrandDatasetAttach(name="Owned", annotation_project_id=project.id),
             session,
+            CURRENT_USER,
         )
     )
     assert result.job_id == project.job_id
@@ -240,6 +301,7 @@ def test_brand_list_pagination_is_bounded_by_request_validation():
         yield Session()
 
     app.dependency_overrides[get_session] = session_override
+    app.dependency_overrides[get_current_user] = lambda: CURRENT_USER
     try:
         with TestClient(app) as client:
             assert client.get("/api/v1/brands?limit=101").status_code == 422
@@ -364,3 +426,35 @@ def test_brand_training_uses_each_attached_source_and_rejects_stale_run():
     images[1].source_result_run_token = uuid4()
     with pytest.raises(AnnotationTrainingSourceChanged):
         asyncio.run(service._metadata_for_project(project, images, anchor))
+
+
+def test_dataset_rejects_other_users_job():
+    brand = sample_brand()
+    foreign_job_id = uuid4()
+
+    class ForeignJobSession(Session):
+        async def get(self, model, identifier):
+            if model is ProcessingJob and identifier == foreign_job_id:
+                return SimpleNamespace(
+                    id=identifier,
+                    owner_user_id=OTHER_USER_ID,
+                )
+            return await super().get(model, identifier)
+
+    session = ForeignJobSession(brand)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            attach_brand_dataset(
+                brand.id,
+                BrandDatasetAttach(
+                    name="Foreign frames",
+                    job_id=foreign_job_id,
+                ),
+                session,
+                CURRENT_USER,
+            )
+        )
+
+    assert error.value.status_code == 404
+    assert session.added == []

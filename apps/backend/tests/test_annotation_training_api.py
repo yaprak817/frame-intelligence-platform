@@ -4,7 +4,10 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_annotation_training_service
+from app.api.dependencies import (
+    authorize_result_access,
+    get_annotation_training_service,
+)
 from app.main import app
 from app.schemas.annotation_training import (
     AnnotationTrainingConfig,
@@ -80,6 +83,7 @@ class FakeTrainingService:
 def training_client():
     service = FakeTrainingService()
     app.dependency_overrides[get_annotation_training_service] = lambda: service
+    app.dependency_overrides[authorize_result_access] = lambda: None
     with TestClient(app) as client:
 
         class AllowingLimiter:
